@@ -1172,7 +1172,7 @@ function displayCode(e){
 }
 
 /* ---------------------------- ROUTER / RENDER ---------------------------- */
-const NAV_VIEW_CAT = {dashboard:null, projects:'projects', tickets:'tickets', storecust:'storecust', objects:'objects', devtool:'objects', extmgmt:'objects', users:'setup', settings:'setup', logs:'setup', cicd:'setup'};
+const NAV_VIEW_CAT = {dashboard:null, projects:'projects', tickets:'tickets', storecust:'storecust', objects:'objects', extmgmt:'objects', users:'setup', settings:'setup', logs:'setup', cicd:'setup'};
 function canViewNav(navId){
   const cat = NAV_VIEW_CAT[navId];
   return cat ? can(cat,'view') : true; // dashboard has no gate
@@ -1205,7 +1205,6 @@ function renderSidebar(){
       {id:'tickets', label:'Tickets', icon:'ticket', count:DB.tickets.length},
       {id:'storecust', label:'Store Customization', icon:'storecust', count:DB.storecust.length},
       {id:'objects', label:'Object ID Listing', icon:'objects'},
-      {id:'devtool', label:"Developer's Tool", icon:'github'},
       {id:'extmgmt', label:'Extension Management Comparison', icon:'extmgmt'},
     ]},
     {group:'Administration', items:[
@@ -1295,7 +1294,6 @@ function renderView(){
     case 'settings': return viewSettings();
     case 'logs': return viewLogs();
     case 'cicd': return viewCicd();
-    case 'devtool': return viewDeveloperTool();
     default: return '';
   }
 }
@@ -1860,167 +1858,6 @@ function ghStatus(msg, kind){
   const el = document.getElementById('ghStatus');
   if(el){ el.textContent = msg; el.style.color = kind==='error'?'var(--danger)':kind==='success'?'var(--success)':'var(--text-faint)'; }
 }
-
-/* ============================================================
-   DEVELOPER'S TOOL — reads AL object metadata extracted by the
-   target repo's extract-al-objects.yml workflow.
-   ============================================================ */
-const DEVTOOL_OWNER  = 'HOXT-Dev';
-const DEVTOOL_REPO   = 'HOXT-Developers-Tool';
-const DEVTOOL_BRANCH = 'main';
-  
-const devToolState = { loaded:false, loading:false, error:'', rows:[], search:'', appFilter:'', typeFilter:'', lastFetched:null };
-
-async function loadDeveloperToolData(force){
-  if(devToolState.loading) return;
-  if(devToolState.loaded && !force) return;
-  const gh = { owner:'HOXT-Dev', repo:'HOXT-Developers-Tool', branch:'main' }; // edit if different
-  devToolState.loading = true;
-  devToolState.error = '';
-  try{
-    devToolState.rows = await extractAlObjectsFromRepo(gh);
-    devToolState.lastFetched = new Date().toISOString();
-  }catch(err){
-    devToolState.error = err.message || String(err);
-    devToolState.rows = [];
-  }
-  devToolState.loading = false;
-  devToolState.loaded = true;
-}
-
-// Regex mirrors extract_al_objects.py exactly — keep in sync if you change either
-const AL_OBJECT_RE = /^\s*(tableextension|pageextension|reportextension|enumextension|permissionsetextension|table|page|report|codeunit|query|xmlport|enum|permissionset|controladdin)\s+(\d+)\s+(?:"([^"]+)"|(\S+))/i;
-
-async function extractAlObjectsFromRepo(gh){
-  const token = ghToken();
-  const headers = token
-    ? { 'Authorization':`Bearer ${token}`, 'Accept':'application/vnd.github+json' }
-    : { 'Accept':'application/vnd.github+json' };
-  const api = (p)=> fetch(`https://api.github.com/repos/${gh.owner}/${gh.repo}${p}`, { headers })
-                       .then(r=>{ if(!r.ok) throw new Error(`GitHub API ${r.status} on ${p}`); return r.json(); });
-
-  const tree = await api(`/git/trees/${encodeURIComponent(gh.branch)}?recursive=1`);
-  if(!tree.tree) throw new Error('Could not read repo tree — wrong branch name?');
-
-  const alFiles   = tree.tree.filter(n=>n.type==='blob' && n.path.toLowerCase().endsWith('.al'));
-  const appJsonPaths = tree.tree.filter(n=>n.type==='blob' && n.path.toLowerCase().endsWith('app.json')).map(n=>n.path);
-
-  if(!alFiles.length && !appJsonPaths.length){
-    throw new Error('No .al files or app.json found in this repo — is the branch correct?');
-  }
-
-  const appMetas = [];
-  for(const p of appJsonPaths){
-    try{
-      const blob = await api(`/contents/${encodeURIComponent(p).replace(/%2F/g,'/')}?ref=${encodeURIComponent(gh.branch)}`);
-      const text = decodeURIComponent(escape(atob(blob.content.replace(/\n/g,''))));
-      const meta = JSON.parse(text);
-      appMetas.push({
-        dir: p.replace(/\/app\.json$/i,''),
-        app_id: meta.id, app_name: meta.name,
-        publisher: meta.publisher, app_version: meta.version,
-      });
-    }catch(e){ }
-  }
-  const nearestApp = (filePath)=>{
-    const candidates = appMetas.filter(a=> filePath === a.dir || filePath.startsWith(a.dir+'/'));
-    return candidates.sort((a,b)=>b.dir.length-a.dir.length)[0] || null;
-  };
-
-  const CAP = 300;
-  if(alFiles.length > CAP) console.warn(`Repo has ${alFiles.length} .al files — capping at ${CAP} for rate limits.`);
-  const rows = [];
-  for(const f of alFiles.slice(0, CAP)){
-    try{
-      const blob = await api(`/contents/${encodeURIComponent(f.path).replace(/%2F/g,'/')}?ref=${encodeURIComponent(gh.branch)}`);
-      const text = decodeURIComponent(escape(atob(blob.content.replace(/\n/g,''))));
-      const meta = nearestApp(f.path);
-      for(const line of text.split('\n')){
-        const stripped = line.trimStart();
-        if(stripped.startsWith('//')) continue; 
-        const m = AL_OBJECT_RE.exec(line);
-        if(!m) continue;
-        rows.push({
-          object_type: m[1].toLowerCase(),
-          object_id:   parseInt(m[2],10),
-          object_name: m[3] || m[4],
-          app_name:    meta ? meta.app_name : null,
-          app_version: meta ? meta.app_version : null,
-          publisher:   meta ? meta.publisher : null,
-          source_file: f.path,
-        });
-      }
-    }catch(e){ /* skip unreadable file */ }
-  }
-  return rows;
-}
-
-function viewDeveloperTool(){
-  if(!devToolState.loaded && !devToolState.loading){
-    loadDeveloperToolData().then(()=>render());
-  }
-  if(devToolState.loading){
-    return `<div class="card" style="text-align:center;padding:60px 20px;color:var(--text-faint);">${icon('github')}<p style="margin-top:10px;font-size:13px;">Loading AL object metadata from GitHub…</p></div>`;
-  }
-  if(devToolState.error){
-    return `<div class="card" style="text-align:center;padding:50px 20px;">
-      <div style="color:var(--danger);">${icon('alert')}</div>
-      <h4 style="margin:10px 0 6px;">Couldn't load object metadata</h4>
-      <p style="font-size:12.5px;color:var(--text-dim);max-width:520px;margin:0 auto 16px;">${escapeHtml(devToolState.error)}</p>
-      <p style="font-size:11.5px;color:var(--text-faint);max-width:520px;margin:0 auto 16px;">Read <span class="mono">${escapeHtml(DEVTOOL_OBJECTS_PATH)}</span> from <span class="mono">${escapeHtml(ghSettings().owner||'?')}/${escapeHtml(ghSettings().repo||'?')}</span>. Make sure the workflow in that repo has run at least once and the path matches.</p>
-      <button class="btn btn-primary" id="devToolRetry">${icon('history')} Retry</button>
-    </div>`;
-  }
-  if(!devToolState.rows.length){
-    return `<div class="card" style="text-align:center;padding:60px 20px;color:var(--text-faint);">${icon('github')}<h4 style="margin:10px 0 6px;color:var(--text-dim);">No objects found</h4><p style="font-size:12.5px;">The metadata file exists but contains no rows yet.</p><button class="btn" id="devToolRetry" style="margin-top:14px;">${icon('history')} Refresh</button></div>`;
-  }
-
-  const q = devToolState.search.trim().toLowerCase();
-  const apps = [...new Set(devToolState.rows.map(r=>r.app_name).filter(Boolean))].sort();
-  const types = [...new Set(devToolState.rows.map(r=>r.object_type).filter(Boolean))].sort();
-
-  let rows = devToolState.rows;
-  if(q) rows = rows.filter(r=> String(r.object_id||'').includes(q) || String(r.object_name||'').toLowerCase().includes(q) || String(r.app_name||'').toLowerCase().includes(q) || String(r.publisher||'').toLowerCase().includes(q) || String(r.object_type||'').toLowerCase().includes(q));
-  if(devToolState.appFilter)  rows = rows.filter(r=>r.app_name===devToolState.appFilter);
-  if(devToolState.typeFilter) rows = rows.filter(r=>r.object_type===devToolState.typeFilter);
-
-  const byType = {};
-  rows.forEach(r=>{ const t = r.object_type || 'unknown'; (byType[t] = byType[t] || []).push(r); });
-  const typeOrder = Object.keys(byType).sort();
-  const total = devToolState.rows.length;
-  const appCount = new Set(devToolState.rows.map(r=>r.app_name).filter(Boolean)).size;
-
-  return `
-  <div class="stat-grid">
-    <div class="card stat-card"><div class="stat-icon">${icon('objects')}</div><div class="stat-value">${total}</div><div class="stat-label">AL objects extracted</div></div>
-    <div class="card stat-card"><div class="stat-icon">${icon('layers')}</div><div class="stat-value">${appCount}</div><div class="stat-label">Distinct apps / extensions</div></div>
-    <div class="card stat-card"><div class="stat-icon">${icon('github')}</div><div class="stat-value" style="font-size:15px;line-height:1.4;">${escapeHtml(ghSettings().repo||'—')}</div><div class="stat-label">Source repo · ${devToolState.lastFetched?timeAgo(devToolState.lastFetched):'—'}</div></div>
-  </div>
-  <div class="filter-bar">
-    <div class="search-input">${icon('search')}<input type="text" id="devToolSearch" placeholder="Search name / ID / app / publisher…" value="${escapeAttr(devToolState.search)}"></div>
-    <select id="devToolAppFilter"><option value="">All apps</option>${apps.map(a=>`<option value="${escapeAttr(a)}" ${devToolState.appFilter===a?'selected':''}>${escapeHtml(a)}</option>`).join('')}</select>
-    <select id="devToolTypeFilter"><option value="">All object types</option>${types.map(t=>`<option value="${escapeAttr(t)}" ${devToolState.typeFilter===t?'selected':''}>${escapeHtml(t)}</option>`).join('')}</select>
-    <button class="btn btn-sm" id="devToolRetry">${icon('history')} Refresh</button>
-    <span class="hint" style="color:var(--text-faint);font-size:12px;">${rows.length} of ${total} object(s)</span>
-  </div>
-  ${typeOrder.length ? typeOrder.map(t=>`
-    <div class="card" style="padding:0;margin-bottom:16px;">
-      <div class="section-title" style="padding:16px 20px 4px;"><h3 style="font-size:14px;">${escapeHtml(t)} <span class="badge drafting" style="margin-left:6px;">${byType[t].length}</span></h3></div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Object ID</th><th>Object Name</th><th>App</th><th>Version</th><th>Publisher</th><th>Source File</th></tr></thead>
-        <tbody>${byType[t].sort((a,b)=>Number(a.object_id)-Number(b.object_id)).map(r=>`
-          <tr>
-            <td class="mono" style="font-weight:600;">${escapeHtml(String(r.object_id))}</td>
-            <td>${escapeHtml(String(r.object_name||''))}</td>
-            <td>${escapeHtml(String(r.app_name||'—'))}</td>
-            <td class="mono" style="color:var(--text-faint);font-size:11.5px;">${escapeHtml(String(r.app_version||'—'))}</td>
-            <td style="color:var(--text-faint);font-size:12px;">${escapeHtml(String(r.publisher||'—'))}</td>
-            <td class="mono" style="color:var(--text-faint);font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeAttr(String(r.source_file||''))}">${escapeHtml(String(r.source_file||'—'))}</td>
-          </tr>`).join('')}</tbody>
-      </table></div>
-    </div>`).join('') : `<div class="card" style="text-align:center;padding:50px 20px;color:var(--text-faint);">No matches for the current filters.</div>`}
-  `;
-}
 function b64EncodeUtf8(str){ return btoa(unescape(encodeURIComponent(str))); }
 async function githubApi(path, options){
   const gh = ghSettings();
@@ -2111,18 +1948,6 @@ function buildManifest(){
     }))),
   };
 }
-
-async function githubApiFor(owner, repo, path, options){
-  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
-    ...options,
-    headers:{ 'Authorization':`Bearer ${ghToken()}`, 'Accept':'application/vnd.github+json', ...(options&&options.headers||{}) }
-  });
-  let body = null;
-  try{ body = await res.json(); }catch(e){}
-  if(!res.ok){ const msg = (body&&body.message) ? body.message : `GitHub API error (${res.status})`; throw new Error(msg); }
-  return body;
-}
-  
 function sampleYaml(){
   return `name: BC Object ID Guard
 on:
@@ -3633,16 +3458,6 @@ function attachContentHandlers(){
   document.querySelectorAll('[data-edit]').forEach(el=>{
     el.addEventListener('click', ()=>{ const [kind,id] = el.dataset.edit.split(':'); openEntityModal(kind,id); });
   });
-
-  const devToolSearch = document.getElementById('devToolSearch');
-  if(devToolSearch) devToolSearch.addEventListener('input', e=>{ devToolState.search = e.target.value; renderInPlace('devToolSearch'); });
-  const devToolAppFilter = document.getElementById('devToolAppFilter');
-  if(devToolAppFilter) devToolAppFilter.addEventListener('change', e=>{ devToolState.appFilter = e.target.value; render(); });
-  const devToolTypeFilter = document.getElementById('devToolTypeFilter');
-  if(devToolTypeFilter) devToolTypeFilter.addEventListener('change', e=>{ devToolState.typeFilter = e.target.value; render(); });
-  const devToolRetry = document.getElementById('devToolRetry');
-  if(devToolRetry) devToolRetry.addEventListener('click', async ()=>{ devToolState.loaded = false; await loadDeveloperToolData(true); render(); });
-
   document.querySelectorAll('[data-view]').forEach(el=>{
     el.addEventListener('click', ()=>{ const [kind,id] = el.dataset.view.split(':'); openEntityModal(kind,id); });
   });
