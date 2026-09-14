@@ -1875,23 +1875,11 @@ const devToolState = { loaded:false, loading:false, error:'', rows:[], search:''
 async function loadDeveloperToolData(force){
   if(devToolState.loading) return;
   if(devToolState.loaded && !force) return;
-  const gh = { owner:DEVTOOL_OWNER, repo:DEVTOOL_REPO, branch:DEVTOOL_BRANCH }; // hardcoded, ignores CI/CD tab
+  const gh = { owner:'HOXT-Dev', repo:'HOXT-Developers-Tool', branch:'main' }; // edit if different
   devToolState.loading = true;
   devToolState.error = '';
   try{
-    let jsonText;
-    if(ghToken()){
-      const file = await githubApiFor(DEVTOOL_OWNER, DEVTOOL_REPO, `/contents/${DEVTOOL_OBJECTS_PATH}?ref=${encodeURIComponent(gh.branch)}`, { method:'GET' });
-      jsonText = decodeURIComponent(escape(atob((file.content||'').replace(/\n/g,''))));
-    } else {
-      const url = `https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${gh.branch}/${DEVTOOL_OBJECTS_PATH}?t=${Date.now()}`;
-      const res = await fetch(url);
-      if(!res.ok) throw new Error(`HTTP ${res.status} on ${gh.owner}/${gh.repo}/${DEVTOOL_OBJECTS_PATH} — check the path exists on branch "${gh.branch}", or that the repo is public.`);
-      jsonText = await res.text();
-    }
-    const rows = JSON.parse(jsonText);
-    if(!Array.isArray(rows)) throw new Error('Expected a JSON array of objects.');
-    devToolState.rows = rows;
+    devToolState.rows = await extractAlObjectsFromRepo(gh);
     devToolState.lastFetched = new Date().toISOString();
   }catch(err){
     devToolState.error = err.message || String(err);
@@ -1899,6 +1887,73 @@ async function loadDeveloperToolData(force){
   }
   devToolState.loading = false;
   devToolState.loaded = true;
+}
+
+// Regex mirrors extract_al_objects.py exactly — keep in sync if you change either
+const AL_OBJECT_RE = /^\s*(tableextension|pageextension|reportextension|enumextension|permissionsetextension|table|page|report|codeunit|query|xmlport|enum|permissionset|controladdin)\s+(\d+)\s+(?:"([^"]+)"|(\S+))/i;
+
+async function extractAlObjectsFromRepo(gh){
+  const token = ghToken();
+  const headers = token
+    ? { 'Authorization':`Bearer ${token}`, 'Accept':'application/vnd.github+json' }
+    : { 'Accept':'application/vnd.github+json' };
+  const api = (p)=> fetch(`https://api.github.com/repos/${gh.owner}/${gh.repo}${p}`, { headers })
+                       .then(r=>{ if(!r.ok) throw new Error(`GitHub API ${r.status} on ${p}`); return r.json(); });
+
+  const tree = await api(`/git/trees/${encodeURIComponent(gh.branch)}?recursive=1`);
+  if(!tree.tree) throw new Error('Could not read repo tree — wrong branch name?');
+
+  const alFiles   = tree.tree.filter(n=>n.type==='blob' && n.path.toLowerCase().endsWith('.al'));
+  const appJsonPaths = tree.tree.filter(n=>n.type==='blob' && n.path.toLowerCase().endsWith('app.json')).map(n=>n.path);
+
+  if(!alFiles.length && !appJsonPaths.length){
+    throw new Error('No .al files or app.json found in this repo — is the branch correct?');
+  }
+
+  const appMetas = [];
+  for(const p of appJsonPaths){
+    try{
+      const blob = await api(`/contents/${encodeURIComponent(p).replace(/%2F/g,'/')}?ref=${encodeURIComponent(gh.branch)}`);
+      const text = decodeURIComponent(escape(atob(blob.content.replace(/\n/g,''))));
+      const meta = JSON.parse(text);
+      appMetas.push({
+        dir: p.replace(/\/app\.json$/i,''),
+        app_id: meta.id, app_name: meta.name,
+        publisher: meta.publisher, app_version: meta.version,
+      });
+    }catch(e){ 
+  }
+  const nearestApp = (filePath)=>{
+    const candidates = appMetas.filter(a=> filePath === a.dir || filePath.startsWith(a.dir+'/'));
+    return candidates.sort((a,b)=>b.dir.length-a.dir.length)[0] || null;
+  };
+
+  const CAP = 300;
+  if(alFiles.length > CAP) console.warn(`Repo has ${alFiles.length} .al files — capping at ${CAP} for rate limits.`);
+  const rows = [];
+  for(const f of alFiles.slice(0, CAP)){
+    try{
+      const blob = await api(`/contents/${encodeURIComponent(f.path).replace(/%2F/g,'/')}?ref=${encodeURIComponent(gh.branch)}`);
+      const text = decodeURIComponent(escape(atob(blob.content.replace(/\n/g,''))));
+      const meta = nearestApp(f.path);
+      for(const line of text.split('\n')){
+        const stripped = line.trimStart();
+        if(stripped.startsWith('//')) continue; 
+        const m = AL_OBJECT_RE.exec(line);
+        if(!m) continue;
+        rows.push({
+          object_type: m[1].toLowerCase(),
+          object_id:   parseInt(m[2],10),
+          object_name: m[3] || m[4],
+          app_name:    meta ? meta.app_name : null,
+          app_version: meta ? meta.app_version : null,
+          publisher:   meta ? meta.publisher : null,
+          source_file: f.path,
+        });
+      }
+    }catch(e){ /* skip unreadable file */ }
+  }
+  return rows;
 }
 
 function viewDeveloperTool(){
