@@ -1865,7 +1865,6 @@ function ghStatus(msg, kind){
    DEVELOPER'S TOOL — reads AL object metadata extracted by the
    target repo's extract-al-objects.yml workflow.
    ============================================================ */
-const DEVTOOL_OBJECTS_PATH = 'app.json';
 const DEVTOOL_OWNER  = 'HOXT-Dev';
 const DEVTOOL_REPO   = 'HOXT-Developers-Tool';
 const DEVTOOL_BRANCH = 'main';
@@ -1921,7 +1920,7 @@ async function extractAlObjectsFromRepo(gh){
         app_id: meta.id, app_name: meta.name,
         publisher: meta.publisher, app_version: meta.version,
       });
-    }catch(e){ 
+    }catch(e){ }
   }
   const nearestApp = (filePath)=>{
     const candidates = appMetas.filter(a=> filePath === a.dir || filePath.startsWith(a.dir+'/'));
@@ -3633,7 +3632,9 @@ function attachChromeHandlers(){
 function attachContentHandlers(){
   document.querySelectorAll('[data-edit]').forEach(el=>{
     el.addEventListener('click', ()=>{ const [kind,id] = el.dataset.edit.split(':'); openEntityModal(kind,id); });
-      const devToolSearch = document.getElementById('devToolSearch');
+  });
+
+  const devToolSearch = document.getElementById('devToolSearch');
   if(devToolSearch) devToolSearch.addEventListener('input', e=>{ devToolState.search = e.target.value; renderInPlace('devToolSearch'); });
   const devToolAppFilter = document.getElementById('devToolAppFilter');
   if(devToolAppFilter) devToolAppFilter.addEventListener('change', e=>{ devToolState.appFilter = e.target.value; render(); });
@@ -3641,7 +3642,6 @@ function attachContentHandlers(){
   if(devToolTypeFilter) devToolTypeFilter.addEventListener('change', e=>{ devToolState.typeFilter = e.target.value; render(); });
   const devToolRetry = document.getElementById('devToolRetry');
   if(devToolRetry) devToolRetry.addEventListener('click', async ()=>{ devToolState.loaded = false; await loadDeveloperToolData(true); render(); });
-  });
 
   document.querySelectorAll('[data-view]').forEach(el=>{
     el.addEventListener('click', ()=>{ const [kind,id] = el.dataset.view.split(':'); openEntityModal(kind,id); });
