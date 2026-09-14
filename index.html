@@ -1866,28 +1866,27 @@ function ghStatus(msg, kind){
    target repo's extract-al-objects.yml workflow.
    ============================================================ */
 const DEVTOOL_OBJECTS_PATH = 'object-metadata/objects.json';
+const DEVTOOL_OWNER  = 'HOXT-Dev';
+const DEVTOOL_REPO   = 'HOXT-Developers-Tool';
+const DEVTOOL_BRANCH = 'main';
+  
 const devToolState = { loaded:false, loading:false, error:'', rows:[], search:'', appFilter:'', typeFilter:'', lastFetched:null };
 
 async function loadDeveloperToolData(force){
   if(devToolState.loading) return;
   if(devToolState.loaded && !force) return;
-  const gh = ghSettings();
-  if(!gh.owner || !gh.repo){
-    devToolState.error = 'Connect a GitHub repo on the CI/CD tab first (owner + repo).';
-    devToolState.loaded = true;
-    return;
-  }
+  const gh = { owner:DEVTOOL_OWNER, repo:DEVTOOL_REPO, branch:DEVTOOL_BRANCH }; // hardcoded, ignores CI/CD tab
   devToolState.loading = true;
   devToolState.error = '';
   try{
     let jsonText;
     if(ghToken()){
-      const file = await githubApi(`/contents/${DEVTOOL_OBJECTS_PATH}?ref=${encodeURIComponent(gh.branch||'main')}`, { method:'GET' });
+      const file = await githubApiFor(DEVTOOL_OWNER, DEVTOOL_REPO, `/contents/${DEVTOOL_OBJECTS_PATH}?ref=${encodeURIComponent(gh.branch)}`, { method:'GET' });
       jsonText = decodeURIComponent(escape(atob((file.content||'').replace(/\n/g,''))));
     } else {
-      const url = `https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${gh.branch||'main'}/${DEVTOOL_OBJECTS_PATH}?t=${Date.now()}`;
+      const url = `https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${gh.branch}/${DEVTOOL_OBJECTS_PATH}?t=${Date.now()}`;
       const res = await fetch(url);
-      if(!res.ok) throw new Error(`HTTP ${res.status} — the repo may be private (paste a token on the CI/CD tab) or the file doesn't exist yet.`);
+      if(!res.ok) throw new Error(`HTTP ${res.status} on ${gh.owner}/${gh.repo}/${DEVTOOL_OBJECTS_PATH} — check the path exists on branch "${gh.branch}", or that the repo is public.`);
       jsonText = await res.text();
     }
     const rows = JSON.parse(jsonText);
@@ -2058,6 +2057,18 @@ function buildManifest(){
     }))),
   };
 }
+
+async function githubApiFor(owner, repo, path, options){
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
+    ...options,
+    headers:{ 'Authorization':`Bearer ${ghToken()}`, 'Accept':'application/vnd.github+json', ...(options&&options.headers||{}) }
+  });
+  let body = null;
+  try{ body = await res.json(); }catch(e){}
+  if(!res.ok){ const msg = (body&&body.message) ? body.message : `GitHub API error (${res.status})`; throw new Error(msg); }
+  return body;
+}
+  
 function sampleYaml(){
   return `name: BC Object ID Guard
 on:
