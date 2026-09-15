@@ -1172,7 +1172,7 @@ function displayCode(e){
 }
 
 /* ---------------------------- ROUTER / RENDER ---------------------------- */
-const NAV_VIEW_CAT = {dashboard:null, projects:'projects', tickets:'tickets', storecust:'storecust', objects:'objects', extmgmt:'objects', users:'setup', settings:'setup', logs:'setup', cicd:'setup'};
+const NAV_VIEW_CAT = {dashboard:null, projects:'projects', devtool:'projects', tickets:'tickets', storecust:'storecust', objects:'objects', extmgmt:'objects', users:'setup', settings:'setup', logs:'setup', cicd:'setup'};
 function canViewNav(navId){
   const cat = NAV_VIEW_CAT[navId];
   return cat ? can(cat,'view') : true; // dashboard has no gate
@@ -1202,6 +1202,7 @@ function renderSidebar(){
     ]},
     {group:'Work Items', items:[
       {id:'projects', label:'Projects', icon:'project', count:DB.projects.length},
+      {id:'devtool', label:'Dev-tool', icon:'cicd'},
       {id:'tickets', label:'Tickets', icon:'ticket', count:DB.tickets.length},
       {id:'storecust', label:'Store Customization', icon:'storecust', count:DB.storecust.length},
       {id:'objects', label:'Object ID Listing', icon:'objects'},
@@ -1255,6 +1256,7 @@ function renderTopbar(){
   const titles = {
     dashboard:['Summary Dashboard',''],
     projects:['Projects','All Healthy Options Projects'],
+    devtool:['Dev-tool','Objects, Object ID, Description & Version — synced from GitHub'],
     tickets:['Tickets','Ticket Request from FreshService'],
     storecust:['Store Customization','Store Server Customizations'],
     objects:['Object ID Listing','Business Central Objects Range'],
@@ -1286,6 +1288,7 @@ function renderView(){
   switch(state.view){
     case 'dashboard': return viewDashboard();
     case 'projects': return viewEntityList('project');
+    case 'devtool': return viewDevTool();
     case 'tickets': return viewEntityList('ticket');
     case 'storecust': return viewEntityList('storecust');
     case 'objects': return viewObjects();
@@ -1977,6 +1980,152 @@ jobs:
             -d '{"text":"Object ID collision detected in PR #\${{ github.event.number }}"}'`;
 }
 function escapeHtml(s){ return s.replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+/* ======================================================================
+   DEV-TOOL — per-project sync of Objects / Object ID / Version straight
+   from a Business Central AL source repo on GitHub. Read-only, browser-
+   side, uses the GitHub Git Data API (tree + blobs) — no GitHub Actions
+   or CI/CD involved (unlike the CI/CD tab above, which pushes files and
+   triggers workflows; this only reads). Connection details live per
+   project (project.devTool), since each of the 5 projects can point at
+   a different repo, or a different subfolder of a shared monorepo. The
+   token is shared across every project's Dev-tool sync and, like the
+   CI/CD tab's PAT, never gets written to SharePoint.
+   ====================================================================== */
+function devToolTokenRemember(){ return localStorage.getItem('bcovc_devtool_token_remember') === '1'; }
+function setDevToolTokenRemember(v){ if(v) localStorage.setItem('bcovc_devtool_token_remember','1'); else { localStorage.removeItem('bcovc_devtool_token_remember'); localStorage.removeItem('bcovc_devtool_token'); } }
+function devToolToken(){ return sessionStorage.getItem('bcovc_devtool_token') || (devToolTokenRemember() ? (localStorage.getItem('bcovc_devtool_token')||'') : ''); }
+function setDevToolToken(t){
+  if(t){ sessionStorage.setItem('bcovc_devtool_token', t); if(devToolTokenRemember()) localStorage.setItem('bcovc_devtool_token', t); }
+  else { sessionStorage.removeItem('bcovc_devtool_token'); localStorage.removeItem('bcovc_devtool_token'); }
+}
+async function devToolApi(owner, repo, path){
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
+    headers:{ 'Authorization':`Bearer ${devToolToken()}`, 'Accept':'application/vnd.github+json' }
+  });
+  let body=null; try{ body = await res.json(); }catch(e){}
+  if(!res.ok) throw new Error((body&&body.message)||`GitHub API error (${res.status})`);
+  return body;
+}
+function devToolDecodeB64(b64){ return decodeURIComponent(escape(atob(b64.replace(/\n/g,'')))); }
+// Matches AL object declarations: "table 50100 "My Table"", "codeunit 50101 Foo {",
+// "tableextension 50102 "My Ext" extends "Customer"", etc.
+const DEVTOOL_AL_OBJECT_RE = /^\s*(table|tableextension|page|pageextension|pagecustomization|report|reportextension|codeunit|query|xmlport|enum|enumextension|permissionset|permissionsetextension|profile|controladdin|interface)\s+(\d+)\s+"?([^"\r\n{]+?)"?\s*(\{|extends)/gim;
+function devToolParseAlObjects(text){
+  const out=[]; let m; DEVTOOL_AL_OBJECT_RE.lastIndex=0;
+  while((m = DEVTOOL_AL_OBJECT_RE.exec(text))) out.push({ type:m[1].toLowerCase(), id:Number(m[2]), name:m[3].trim() });
+  return out;
+}
+function devToolCfg(project){
+  return project.devTool || (project.devTool = { owner:'', repo:'', branch:'main', folder:'', lastSyncedAt:null, fileShas:{} });
+}
+// Pulls the repo's file tree once, then only downloads files whose blob sha
+// changed since the last sync (cached in cfg.fileShas) — so a repeat sync
+// with nothing changed costs a single API call.
+async function syncProjectFromGithub(project, silent){
+  const cfg = devToolCfg(project);
+  if(!cfg.owner || !cfg.repo || !devToolToken()){
+    if(!silent) toast('Fill in Owner, Repo and Token first.', 'warning');
+    return false;
+  }
+  try{
+    const tree = await devToolApi(cfg.owner, cfg.repo, `/git/trees/${encodeURIComponent(cfg.branch||'main')}?recursive=1`);
+    const scoped = (tree.tree||[]).filter(e=> e.type==='blob' && (!cfg.folder || e.path===cfg.folder || e.path.startsWith(cfg.folder+'/')));
+    const entries = scoped.filter(e=> e.path.endsWith('.al') || /(^|\/)app\.json$/.test(e.path));
+    const prevShas = cfg.fileShas || {}, newShas = {};
+    const changedPaths = new Set();
+    entries.forEach(e=>{ newShas[e.path]=e.sha; if(prevShas[e.path]!==e.sha) changedPaths.add(e.path); });
+    const removedPaths = Object.keys(prevShas).filter(p=>!(p in newShas));
+
+    project._devToolCache = project._devToolCache || {};
+    let appMeta = null;
+    const objects = [];
+    for(const e of entries){
+      let text = (!changedPaths.has(e.path) && project._devToolCache[e.path]) ? project._devToolCache[e.path] : null;
+      if(text===null){
+        const blob = await devToolApi(cfg.owner, cfg.repo, `/git/blobs/${e.sha}`);
+        text = devToolDecodeB64(blob.content);
+        project._devToolCache[e.path] = text;
+      }
+      if(e.path.endsWith('app.json')){ try{ appMeta = JSON.parse(text); }catch(_){} }
+      else objects.push(...devToolParseAlObjects(text));
+    }
+    removedPaths.forEach(p=> delete project._devToolCache[p]);
+
+    if(appMeta && appMeta.version) project.version = appMeta.version;
+    project.objects = project.objects || [];
+    let added=0, updated=0;
+    objects.forEach(o=>{
+      const typeRec = DB.settings.objectTypes.find(t=>t.code.toUpperCase()===o.type.slice(0,3).toUpperCase()) || DB.settings.objectTypes[0];
+      const dup = project.objects.find(x=>x.objectType===typeRec.id && x.objectId===o.id);
+      if(!dup){ project.objects.push({id:uid(), objectType:typeRec.id, objectId:o.id, description:o.name}); markRangeUsed(typeRec.id,o.id); added++; }
+      else { dup.description = o.name; updated++; }
+    });
+
+    cfg.fileShas = newShas; cfg.lastSyncedAt = new Date().toISOString();
+    saveDB();
+    log('Synced','github', project.name, `${cfg.owner}/${cfg.repo}@${cfg.branch||'main'} — ${added} new, ${updated} updated object(s)`);
+    if(!silent) toast(`Synced: ${added} new, ${updated} updated object(s).`, 'success');
+    return true;
+  }catch(err){
+    if(!silent) toast(`GitHub sync failed: ${err.message}`, 'error'); else console.error('Dev-tool sync failed:', err);
+    return false;
+  }
+}
+function viewDevTool(){
+  const projects = DB.projects;
+  if(!projects.length){
+    return `<div class="card" style="text-align:center;padding:40px;">${icon('search')}<p style="margin-top:10px;color:var(--text-faint);">No projects yet — create a project first.</p></div>`;
+  }
+  if(!state.devToolProjectId || !projects.find(p=>p.id===state.devToolProjectId)) state.devToolProjectId = projects[0].id;
+  const project = projects.find(p=>p.id===state.devToolProjectId);
+  const cfg = devToolCfg(project);
+  const canEdit = can('projects','modify');
+  const objRows = (project.objects||[]).slice().sort((a,b)=>a.objectId-b.objectId).map(o=>{
+    const t = typeById(o.objectType);
+    return `<tr><td class="mono">${t?t.code:'—'}</td><td class="mono">${o.objectId}</td><td>${escapeHtml(o.description||'')}</td></tr>`;
+  }).join('');
+  return `
+  <div class="filter-bar">
+    <div class="form-row" style="min-width:260px;margin-bottom:0;">
+      <select id="dtProjectSelect">
+        ${projects.map(p=>`<option value="${p.id}" ${p.id===project.id?'selected':''}>${escapeHtml(p.name)} (${displayCode(p)})</option>`).join('')}
+      </select>
+    </div>
+    ${project.version?vchip(project.version):''}
+    <span class="hint" style="color:var(--text-faint);font-size:12px;margin-left:auto;">${cfg.lastSyncedAt?`Last synced ${timeAgo(cfg.lastSyncedAt)}`:'Never synced yet'}</span>
+  </div>
+  <div class="card" style="margin-bottom:18px;">
+    <div class="section-title"><h3>${icon('cicd')} GitHub Source</h3><span class="hint">Reads Objects, Object ID and Version directly from this project's AL repo — no CI/CD pipeline involved</span></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Owner / Org</label><input type="text" id="dtOwner" value="${escapeAttr(cfg.owner)}" placeholder="e.g. my-company" ${canEdit?'':'disabled'}></div>
+      <div class="form-row"><label>Repository</label><input type="text" id="dtRepo" value="${escapeAttr(cfg.repo)}" placeholder="e.g. bc-al-projects" ${canEdit?'':'disabled'}></div>
+      <div class="form-row"><label>Branch</label><input type="text" id="dtBranch" value="${escapeAttr(cfg.branch||'main')}" placeholder="main" ${canEdit?'':'disabled'}></div>
+      <div class="form-row"><label>Folder <span class="hint">(optional — blank = whole repo)</span></label><input type="text" id="dtFolder" value="${escapeAttr(cfg.folder||'')}" placeholder="apps/warehouse" ${canEdit?'':'disabled'}></div>
+    </div>
+    <div class="form-row">
+      <label>GitHub Token <span class="hint">(fine-grained, Contents: Read-only, scoped to this repo)</span></label>
+      <input type="password" id="dtToken" value="${escapeAttr(devToolToken())}" placeholder="github_pat_..." ${canEdit?'':'disabled'}>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;margin-top:4px;">
+        <input type="checkbox" id="dtTokenRemember" ${devToolTokenRemember()?'checked':''} ${canEdit?'':'disabled'}>
+        Remember on this device
+      </label>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px;">
+      ${canEdit?`<button class="btn btn-primary" id="dtSyncBtn">${icon('upload')} Sync Now</button>`:''}
+    </div>
+    <div id="dtStatus" style="font-size:12px;color:var(--text-faint);margin-top:8px;"></div>
+  </div>
+  <div class="card" style="padding:0;">
+    <div class="section-title" style="padding:16px 18px 0;"><h3>Objects <span class="hint" style="font-weight:400;">(${(project.objects||[]).length})</span></h3></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Type</th><th>Object ID</th><th>Description</th></tr></thead>
+        <tbody id="dtObjRows">${objRows || `<tr class="empty-row"><td colspan="3">${icon('search')}<br>No objects synced yet — fill in the repo details above and click Sync Now.</td></tr>`}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
 
 /* ======================================================================
    EXTENSION MANAGEMENT COMPARISON
@@ -3475,6 +3624,30 @@ function attachContentHandlers(){
   if(searchInput) searchInput.addEventListener('input', e=>{ state.search = e.target.value; renderInPlace(); });
   const statusFilter = document.getElementById('statusFilter');
   if(statusFilter) statusFilter.addEventListener('change', e=>{ state.statusFilter = e.target.value; render(); });
+
+  const dtProjectSelect = document.getElementById('dtProjectSelect');
+  if(dtProjectSelect) dtProjectSelect.addEventListener('change', e=>{ state.devToolProjectId = e.target.value; render(); });
+  const dtSyncBtn = document.getElementById('dtSyncBtn');
+  if(dtSyncBtn){
+    dtSyncBtn.addEventListener('click', async ()=>{
+      const project = DB.projects.find(p=>p.id===state.devToolProjectId);
+      if(!project) return;
+      const cfg = devToolCfg(project);
+      cfg.owner = document.getElementById('dtOwner').value.trim();
+      cfg.repo = document.getElementById('dtRepo').value.trim();
+      cfg.branch = document.getElementById('dtBranch').value.trim() || 'main';
+      cfg.folder = document.getElementById('dtFolder').value.trim();
+      setDevToolTokenRemember(document.getElementById('dtTokenRemember').checked);
+      setDevToolToken(document.getElementById('dtToken').value.trim());
+      const statusEl = document.getElementById('dtStatus');
+      statusEl.textContent = 'Syncing…'; statusEl.style.color = 'var(--text-faint)';
+      dtSyncBtn.disabled = true;
+      const ok = await syncProjectFromGithub(project, true);
+      dtSyncBtn.disabled = false;
+      if(!ok && statusEl){ statusEl.textContent = 'Sync failed — check owner/repo/branch/token and try again.'; statusEl.style.color = 'var(--danger)'; }
+      render();
+    });
+  }
 
   document.querySelectorAll('[data-stab]').forEach(el=>{
     el.addEventListener('click', ()=>{ state.settingsTab = el.dataset.stab; render(); });
