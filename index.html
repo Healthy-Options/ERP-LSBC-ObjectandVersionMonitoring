@@ -9,7 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.1/lib/msal-browser.min.js" onerror="window.__MSAL_LOAD_FAILED=true"></script>
 <style>
-/*DESIGN TOKENS */
+/* ============================= DESIGN TOKENS ============================= */
 :root{
   --font-display:'Space Grotesk',sans-serif;
   --font-body:'Inter',sans-serif;
@@ -2101,8 +2101,11 @@ async function autoSyncDevSourceIfReady(key){
   if(!cfg.owner || !cfg.repo || !token) return;
   const statusEl = document.getElementById('dtStatus');
   if(statusEl){ statusEl.textContent = 'Auto-syncing…'; statusEl.style.color = 'var(--text-faint)'; }
-  await syncDevSource(key, true);
-  if(state.view===key) render();
+  const ok = await syncDevSource(key, true);
+  if(state.view!==key) return; // navigated away while the request was in flight
+  if(ok){ render(); return; }
+  const el = document.getElementById('dtStatus');
+  if(el){ el.textContent = 'Auto-sync failed — check the browser console (F12) for the exact GitHub error, or re-enter the details below and click Save & Sync Now.'; el.style.color = 'var(--danger)'; }
 }
 function viewDevSource(key){
   const cfg = devSourceCfg(key);
@@ -3662,10 +3665,10 @@ function attachContentHandlers(){
       const statusEl = document.getElementById('dtStatus');
       statusEl.textContent = 'Syncing…'; statusEl.style.color = 'var(--text-faint)';
       dtSyncBtn.disabled = true;
-      const ok = await syncDevSource(key, true);
+      const ok = await syncDevSource(key, false); // false: shows a toast with the exact GitHub error if it fails
       dtSyncBtn.disabled = false;
-      if(!ok && statusEl){ statusEl.textContent = 'Sync failed — check owner/repo/branch/token and try again.'; statusEl.style.color = 'var(--danger)'; }
-      render();
+      if(ok){ render(); }
+      else if(statusEl){ statusEl.textContent = 'Sync failed — see the error above for details, then fix owner/repo/branch/token and try again.'; statusEl.style.color = 'var(--danger)'; }
     });
   }
 
@@ -4359,7 +4362,7 @@ function renderConnectError(msg){
   document.getElementById('retryConnectBtn').addEventListener('click', initApp);
 }
 
-/* APP ENTRY POINT */
+/* ---------------------------- APP ENTRY POINT ---------------------------- */
 async function initApp(){
   if(IS_LOCAL_DEV){
     renderConnecting('Local access mode — loading guest session…');
@@ -4404,7 +4407,9 @@ async function initApp(){
   }
 }
 
-/*BOOT*/
+/* ======================================================================
+   BOOT
+   ====================================================================== */
 if(!IS_AUTH_POPUP){
   initApp();
 }
