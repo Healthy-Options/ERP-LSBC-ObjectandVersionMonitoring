@@ -838,7 +838,8 @@ function toast(msg, kind){
   el.className='toast';
   el.innerHTML = `<span class="dot" style="background:${colors[kind]}"></span><span>${msg}</span>`;
   wrap.appendChild(el);
-  setTimeout(()=>{ el.style.opacity='0'; el.style.transform='translateY(6px)'; el.style.transition='all .25s'; setTimeout(()=>el.remove(),260); }, 2600);
+  const dismissAfter = (kind==='danger'||kind==='error') ? 8000 : 2600; // errors stay up longer so they can actually be read
+  setTimeout(()=>{ el.style.opacity='0'; el.style.transform='translateY(6px)'; el.style.transition='all .25s'; setTimeout(()=>el.remove(),260); }, dismissAfter);
 }
 function log(action, entity, entityName, details){
   DB.logs.unshift({id:uid(), timestamp:new Date().toISOString(), user:currentUser()?currentUser().name:'System', action, entity, entityName, details:details||''});
@@ -2008,6 +2009,7 @@ const DEV_SOURCES = {
   cloudenh:  { label:'Cloud-Enhancements' },
   onpremenh: { label:'OnPrem-Enhancements' },
 };
+const devToolLastError = {}; // key -> most recent sync error message, shown inline until the next attempt
 function devSourceCfg(key){
   const store = DB.settings.devSources || (DB.settings.devSources = {});
   return store[key] || (store[key] = { owner:'', repo:'', branch:'main', folder:'', version:null, lastSyncedAt:null, fileShas:{}, objects:[] });
@@ -2083,12 +2085,15 @@ async function syncDevSource(key, silent){
     });
 
     cfg.fileShas = newShas; cfg.lastSyncedAt = new Date().toISOString();
+    delete devToolLastError[key];
     saveDB();
     log('Synced','github', DEV_SOURCES[key].label, `${cfg.owner}/${cfg.repo}@${cfg.branch||'main'} — ${added} new, ${updated} updated object(s)`);
     if(!silent) toast(`Synced: ${added} new, ${updated} updated object(s).`, 'success');
     return true;
   }catch(err){
-    if(!silent) toast(`GitHub sync failed: ${err.message}`, 'error'); else console.error(`${key} auto-sync failed:`, err);
+    devToolLastError[key] = err.message || String(err);
+    console.error(`[Dev-tool] "${key}" GitHub sync failed:`, err); // always logged, even on silent auto-sync
+    if(!silent) toast(`GitHub sync failed: ${err.message}`, 'danger');
     return false;
   }
 }
@@ -2101,11 +2106,8 @@ async function autoSyncDevSourceIfReady(key){
   if(!cfg.owner || !cfg.repo || !token) return;
   const statusEl = document.getElementById('dtStatus');
   if(statusEl){ statusEl.textContent = 'Auto-syncing…'; statusEl.style.color = 'var(--text-faint)'; }
-  const ok = await syncDevSource(key, true);
-  if(state.view!==key) return; // navigated away while the request was in flight
-  if(ok){ render(); return; }
-  const el = document.getElementById('dtStatus');
-  if(el){ el.textContent = 'Auto-sync failed — check the browser console (F12) for the exact GitHub error, or re-enter the details below and click Save & Sync Now.'; el.style.color = 'var(--danger)'; }
+  await syncDevSource(key, true);
+  if(state.view===key) render(); // reflects either the refreshed objects table or the persistent error banner
 }
 function viewDevSource(key){
   const cfg = devSourceCfg(key);
@@ -2140,6 +2142,7 @@ function viewDevSource(key){
       ${canEdit?`<button class="btn btn-primary" id="dtSyncBtn">${icon('upload')} Save &amp; Sync Now</button>`:''}
     </div>
     <div id="dtStatus" style="font-size:12px;color:var(--text-faint);margin-top:8px;"></div>
+    ${devToolLastError[key] ? `<div style="margin-top:10px;padding:10px 12px;border-radius:8px;background:rgba(220,53,69,0.1);border:1px solid var(--danger);color:var(--danger);font-size:12.5px;font-weight:600;">${icon('warning')||''} Last sync error: ${escapeHtml(devToolLastError[key])}</div>` : ''}
   </div>
   <div class="card" style="padding:0;">
     <div class="section-title" style="padding:16px 18px 0;"><h3>${escapeHtml(label)} Objects <span class="hint" style="font-weight:400;">(${(cfg.objects||[]).length})</span></h3></div>
@@ -3665,10 +3668,8 @@ function attachContentHandlers(){
       const statusEl = document.getElementById('dtStatus');
       statusEl.textContent = 'Syncing…'; statusEl.style.color = 'var(--text-faint)';
       dtSyncBtn.disabled = true;
-      const ok = await syncDevSource(key, false); // false: shows a toast with the exact GitHub error if it fails
-      dtSyncBtn.disabled = false;
-      if(ok){ render(); }
-      else if(statusEl){ statusEl.textContent = 'Sync failed — see the error above for details, then fix owner/repo/branch/token and try again.'; statusEl.style.color = 'var(--danger)'; }
+      await syncDevSource(key, false); // false: also shows a toast with the exact GitHub error if it fails
+      render(); // shows either the refreshed objects table, or the persistent red error banner
     });
   }
 
