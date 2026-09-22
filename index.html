@@ -1204,7 +1204,7 @@ function renderSidebar(){
     ]},
     {group:'Work Items', items:[
       {id:'projects', label:'Projects', icon:'project', count:DB.projects.length},
-      {id:'devtool', label:'Dev-tool', icon:'cicd'},
+      {id:'devtool', label:'HOXT Projects', icon:'layers'},
       {id:'apis', label:'APIs', icon:'cicd'},
       {id:'cloudenh', label:'Cloud-Enhancements', icon:'cicd'},
       {id:'onpremenh', label:'OnPrem-Enhancements', icon:'cicd'},
@@ -1261,7 +1261,7 @@ function renderTopbar(){
   const titles = {
     dashboard:['Summary Dashboard',''],
     projects:['Projects','All Healthy Options Projects'],
-    devtool:['Dev-tool','Objects, Object ID, Description & Version — synced from GitHub'],
+    devtool:['HOXT Projects','Repository, release notes & per-project versions for HOXT - Developer\'s Tool'],
     apis:['APIs','Objects, Object ID, Description & Version — synced from GitHub'],
     cloudenh:['Cloud-Enhancements','Objects, Object ID, Description & Version — synced from GitHub'],
     onpremenh:['OnPrem-Enhancements','Objects, Object ID, Description & Version — synced from GitHub'],
@@ -1296,7 +1296,7 @@ function renderView(){
   switch(state.view){
     case 'dashboard': return viewDashboard();
     case 'projects': return viewEntityList('project');
-    case 'devtool': return viewDevSource('devtool');
+    case 'devtool': return viewHoxtProjects();
     case 'apis': return viewDevSource('apis');
     case 'cloudenh': return viewDevSource('cloudenh');
     case 'onpremenh': return viewDevSource('onpremenh');
@@ -2003,8 +2003,226 @@ function escapeHtml(s){ return s.replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','
    are saved, opening that page again auto-syncs in the background
    (diffed by blob sha, so an unchanged repo costs one API call).
    ====================================================================== */
+/* ======================================================================
+   HOXT PROJECTS — two-panel view for the "HOXT - Developer's Tool"
+   extension: overall extension info (repo link, release notes, current
+   version) plus a table of the individual projects inside that suite
+   (e.g. Yogi / PR4), each with its own version, object count, status,
+   and the release-note remark matching its latest version. Manually
+   maintained for now; will be wired to the live HOXT Developer's Tool
+   BC API once the publisher/group/version/entity name are confirmed.
+   ====================================================================== */
+function hoxtData(){
+  return DB.settings.hoxtProjects || (DB.settings.hoxtProjects = { repoLink:'', currentVersion:'', releaseNotes:[], projects:[] });
+}
+function hoxtLatestRemark(data, project){
+  const notes = (data.releaseNotes||[]).filter(n => n.version===project.latestVersion && (!n.projectCode || n.projectCode===project.code));
+  if(!notes.length) return '';
+  const specific = notes.find(n=>n.projectCode===project.code); // prefer a note tagged to this project over a general one
+  return (specific||notes[0]).remark || '';
+}
+const HOXT_STATUS_OPTS = [
+  {v:'active', l:'Active'},
+  {v:'drafting', l:'In Development'},
+  {v:'pending', l:'Pending Release'},
+  {v:'obsolete', l:'Obsolete'},
+  {v:'danger', l:'Deprecated'},
+];
+function hoxtStatusLabel(v){ const o = HOXT_STATUS_OPTS.find(o=>o.v===v); return o?o.l:cap(v||'Active'); }
+
+function viewHoxtProjects(){
+  const data = hoxtData();
+  const canEdit = can('projects','modify');
+  const projects = data.projects||[];
+  const rows = projects.map(p=>{
+    const remark = hoxtLatestRemark(data, p);
+    return `<tr data-hoxt-project="${p.id}" style="cursor:pointer;">
+      <td>${escapeHtml(p.name)}</td>
+      <td class="mono">${escapeHtml(p.code)}</td>
+      <td>${p.latestVersion?vchip(p.latestVersion):'—'}</td>
+      <td>${p.objectCount||0}</td>
+      <td><span class="badge ${p.status||'active'}"><span class="badge-dot"></span>${hoxtStatusLabel(p.status)}</span></td>
+      <td>${remark?escapeHtml(remark):`<span class="hint" style="color:var(--text-faint);">—</span>`}</td>
+      <td style="text-align:right;" onclick="event.stopPropagation()">${canEdit?`<button class="btn btn-sm" data-hoxt-update="${p.id}">${icon('edit')} Update</button>`:''}</td>
+    </tr>`;
+  }).join('');
+  return `
+  <div class="card" style="margin-bottom:18px;">
+    <div class="section-title"><h3>${icon('layers')} HOXT Project Information</h3></div>
+    <div class="form-grid">
+      <div class="form-row">
+        <label>Repository Link</label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="hoxtRepoLink" value="${escapeAttr(data.repoLink)}" placeholder="https://github.com/..." ${canEdit?'':'disabled'} style="flex:1;">
+          ${data.repoLink?`<a href="${escapeAttr(data.repoLink)}" target="_blank" rel="noopener" class="btn btn-icon btn-ghost" title="Open repository">${icon('github')}</a>`:''}
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Current Version</label>
+        <input type="text" id="hoxtCurrentVersion" value="${escapeAttr(data.currentVersion)}" placeholder="e.g. 26.9.2.1" ${canEdit?'':'disabled'}>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+      <button class="btn" id="hoxtReleaseNotesBtn">${icon('history')} Release Notes</button>
+      ${canEdit?`<button class="btn btn-primary" id="hoxtInfoSaveBtn">Save</button>`:''}
+    </div>
+  </div>
+  <div class="card" style="padding:0;">
+    <div class="section-title" style="padding:16px 18px 0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+      <h3>Projects <span class="hint" style="font-weight:400;">(${projects.length})</span></h3>
+      ${canEdit?`<button class="btn btn-primary btn-sm" id="hoxtAddProjectBtn">${icon('plus')} Add Project</button>`:''}
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Project Name</th><th>Project Code</th><th>Latest Version</th><th># of Objects</th><th>Status</th><th>Latest Remark</th><th style="text-align:right;">Update</th></tr></thead>
+        <tbody>${rows || `<tr class="empty-row"><td colspan="7">${icon('search')}<br>No projects yet — click Add Project to create one.</td></tr>`}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+function openHoxtProjectModal(id){
+  const data = hoxtData();
+  const project = id ? data.projects.find(p=>p.id===id) : null;
+  const canEdit = can('projects','modify');
+  openModal(`
+  <div class="modal">
+    <div class="modal-head">
+      <h3>${project?'Update':'Add'} Project</h3>
+      <button class="close-x" id="modalClose">${icon('close')}</button>
+    </div>
+    <div style="padding:20px;">
+      <div class="form-row"><label>Project Name</label><input type="text" id="hpName" value="${escapeAttr(project?project.name:'')}" placeholder="e.g. Yogi" ${canEdit?'':'disabled'}></div>
+      <div class="form-row"><label>Project Code</label><input type="text" id="hpCode" value="${escapeAttr(project?project.code:'')}" placeholder="e.g. PR4" ${canEdit?'':'disabled'}></div>
+      <div class="form-row"><label>Latest Version</label><input type="text" id="hpVersion" value="${escapeAttr(project?project.latestVersion:'')}" placeholder="e.g. 26.9.2.1" ${canEdit?'':'disabled'}></div>
+      <div class="form-row"><label># of Objects</label><input type="number" min="0" id="hpObjCount" value="${project?(project.objectCount||0):0}" ${canEdit?'':'disabled'}></div>
+      <div class="form-row"><label>Status</label>
+        <select id="hpStatus" ${canEdit?'':'disabled'}>
+          ${HOXT_STATUS_OPTS.map(o=>`<option value="${o.v}" ${project&&project.status===o.v?'selected':''}>${o.l}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="modalCancel">Cancel</button>
+      ${project&&canEdit?`<button class="btn btn-danger" id="hpDeleteBtn">${icon('trash')} Delete</button>`:''}
+      ${canEdit?`<button class="btn btn-primary" id="hpSaveBtn">Save</button>`:''}
+    </div>
+  </div>`);
+  document.getElementById('modalClose').onclick = closeModal;
+  document.getElementById('modalCancel').onclick = closeModal;
+  const delBtn = document.getElementById('hpDeleteBtn');
+  if(delBtn) delBtn.onclick = ()=>{
+    if(!confirm(`Delete project "${project.name}"?`)) return;
+    data.projects = data.projects.filter(p=>p.id!==project.id);
+    saveDB(); closeModal(); render();
+  };
+  const saveBtn = document.getElementById('hpSaveBtn');
+  if(saveBtn) saveBtn.onclick = ()=>{
+    const name = document.getElementById('hpName').value.trim();
+    const code = document.getElementById('hpCode').value.trim();
+    if(!name || !code){ toast('Project Name and Project Code are required.', 'warning'); return; }
+    const vals = {
+      name, code,
+      latestVersion: document.getElementById('hpVersion').value.trim(),
+      objectCount: Number(document.getElementById('hpObjCount').value)||0,
+      status: document.getElementById('hpStatus').value,
+    };
+    if(project){ Object.assign(project, vals); }
+    else { data.projects.push({id:uid(), ...vals}); }
+    saveDB(); closeModal(); render();
+  };
+}
+function openHoxtReleaseNotesModal(){
+  const data = hoxtData();
+  const canEdit = can('projects','modify');
+  const notesSorted = (data.releaseNotes||[]).slice().sort((a,b)=> (b.date||'').localeCompare(a.date||''));
+  const rows = notesSorted.map(n=>{
+    const proj = data.projects.find(p=>p.code===n.projectCode);
+    return `<div class="card" style="margin-bottom:10px;padding:12px 14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          ${n.version?vchip(n.version):''}
+          ${proj?`<span class="badge kind-project">${escapeHtml(proj.name)}</span>`:(n.projectCode?`<span class="badge kind-project">${escapeHtml(n.projectCode)}</span>`:'<span class="badge">General</span>')}
+          <span class="hint" style="color:var(--text-faint);">${n.date?new Date(n.date).toLocaleDateString():''}</span>
+        </div>
+        ${canEdit?`<div>
+          <button class="btn btn-icon btn-sm btn-ghost" data-note-edit="${n.id}">${icon('edit')}</button>
+          <button class="btn btn-icon btn-sm btn-ghost" data-note-del="${n.id}">${icon('trash')}</button>
+        </div>`:''}
+      </div>
+      <div style="font-weight:600;margin-top:6px;">${escapeHtml(n.remark||'')}</div>
+      ${n.notes?`<div style="font-size:12.5px;color:var(--text-faint);margin-top:4px;white-space:pre-wrap;">${escapeHtml(n.notes)}</div>`:''}
+    </div>`;
+  }).join('');
+  openModal(`
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h3>${icon('history')} Release Notes</h3>
+      <button class="close-x" id="modalClose">${icon('close')}</button>
+    </div>
+    <div style="padding:20px;">
+      ${canEdit?`<button class="btn btn-primary btn-sm" id="hoxtAddNoteBtn" style="margin-bottom:14px;">${icon('plus')} Add Entry</button>`:''}
+      <div style="max-height:420px;overflow-y:auto;">
+        ${rows || `<div class="hint" style="color:var(--text-faint);text-align:center;padding:30px 0;">No release notes yet.</div>`}
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="modalCancel">Close</button></div>
+  </div>`);
+  document.getElementById('modalClose').onclick = closeModal;
+  document.getElementById('modalCancel').onclick = closeModal;
+  const addBtn = document.getElementById('hoxtAddNoteBtn');
+  if(addBtn) addBtn.onclick = ()=> openHoxtNoteEditModal(null);
+  document.querySelectorAll('[data-note-edit]').forEach(el=> el.addEventListener('click', ()=> openHoxtNoteEditModal(el.dataset.noteEdit)));
+  document.querySelectorAll('[data-note-del]').forEach(el=> el.addEventListener('click', ()=>{
+    if(!confirm('Delete this release note entry?')) return;
+    data.releaseNotes = data.releaseNotes.filter(n=>n.id!==el.dataset.noteDel);
+    saveDB(); openHoxtReleaseNotesModal();
+  }));
+}
+function openHoxtNoteEditModal(id){
+  const data = hoxtData();
+  const note = id ? data.releaseNotes.find(n=>n.id===id) : null;
+  openModal(`
+  <div class="modal">
+    <div class="modal-head">
+      <h3>${note?'Edit':'Add'} Release Note</h3>
+      <button class="close-x" id="modalClose">${icon('close')}</button>
+    </div>
+    <div style="padding:20px;">
+      <div class="form-row"><label>Project <span class="hint">(optional — leave blank for a general note)</span></label>
+        <select id="hnProject">
+          <option value="">— General —</option>
+          ${data.projects.map(p=>`<option value="${escapeAttr(p.code)}" ${note&&note.projectCode===p.code?'selected':''}>${escapeHtml(p.name)} (${escapeHtml(p.code)})</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row"><label>Version</label><input type="text" id="hnVersion" value="${escapeAttr(note?note.version:'')}" placeholder="e.g. 26.9.2.1"></div>
+      <div class="form-row"><label>Date</label><input type="date" id="hnDate" value="${note&&note.date?note.date.slice(0,10):new Date().toISOString().slice(0,10)}"></div>
+      <div class="form-row"><label>Remark <span class="hint">(short summary — shown in the Projects table)</span></label><input type="text" id="hnRemark" value="${escapeAttr(note?note.remark:'')}" placeholder="e.g. Fixed rounding issue in discount calc"></div>
+      <div class="form-row"><label>Full Notes <span class="hint">(optional)</span></label><textarea id="hnNotes" rows="4" placeholder="Longer dev notes...">${note?escapeHtml(note.notes||''):''}</textarea></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="modalCancel">Cancel</button>
+      <button class="btn btn-primary" id="hnSaveBtn">Save</button>
+    </div>
+  </div>`);
+  document.getElementById('modalClose').onclick = closeModal;
+  document.getElementById('modalCancel').onclick = closeModal;
+  document.getElementById('hnSaveBtn').onclick = ()=>{
+    const vals = {
+      projectCode: document.getElementById('hnProject').value,
+      version: document.getElementById('hnVersion').value.trim(),
+      date: document.getElementById('hnDate').value ? new Date(document.getElementById('hnDate').value).toISOString() : new Date().toISOString(),
+      remark: document.getElementById('hnRemark').value.trim(),
+      notes: document.getElementById('hnNotes').value.trim(),
+    };
+    if(!vals.version || !vals.remark){ toast('Version and Remark are required.', 'warning'); return; }
+    if(note){ Object.assign(note, vals); }
+    else { data.releaseNotes.push({id:uid(), ...vals}); }
+    saveDB();
+    openHoxtReleaseNotesModal();
+  };
+}
+
 const DEV_SOURCES = {
-  devtool:   { label:'Dev-tool' },
   apis:      { label:'APIs' },
   cloudenh:  { label:'Cloud-Enhancements' },
   onpremenh: { label:'OnPrem-Enhancements' },
@@ -3653,6 +3871,28 @@ function attachContentHandlers(){
   if(searchInput) searchInput.addEventListener('input', e=>{ state.search = e.target.value; renderInPlace(); });
   const statusFilter = document.getElementById('statusFilter');
   if(statusFilter) statusFilter.addEventListener('change', e=>{ state.statusFilter = e.target.value; render(); });
+
+  const hoxtInfoSaveBtn = document.getElementById('hoxtInfoSaveBtn');
+  if(hoxtInfoSaveBtn){
+    hoxtInfoSaveBtn.addEventListener('click', ()=>{
+      const data = hoxtData();
+      data.repoLink = document.getElementById('hoxtRepoLink').value.trim();
+      data.currentVersion = document.getElementById('hoxtCurrentVersion').value.trim();
+      saveDB();
+      toast('HOXT Project Information saved.', 'success');
+      render();
+    });
+  }
+  const hoxtReleaseNotesBtn = document.getElementById('hoxtReleaseNotesBtn');
+  if(hoxtReleaseNotesBtn) hoxtReleaseNotesBtn.addEventListener('click', ()=> openHoxtReleaseNotesModal());
+  const hoxtAddProjectBtn = document.getElementById('hoxtAddProjectBtn');
+  if(hoxtAddProjectBtn) hoxtAddProjectBtn.addEventListener('click', ()=> openHoxtProjectModal(null));
+  document.querySelectorAll('[data-hoxt-project]').forEach(el=>{
+    el.addEventListener('click', ()=> openHoxtProjectModal(el.dataset.hoxtProject));
+  });
+  document.querySelectorAll('[data-hoxt-update]').forEach(el=>{
+    el.addEventListener('click', ()=> openHoxtProjectModal(el.dataset.hoxtUpdate));
+  });
 
   const dtSyncBtn = document.getElementById('dtSyncBtn');
   if(dtSyncBtn){
