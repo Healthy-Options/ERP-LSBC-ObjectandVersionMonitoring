@@ -1203,8 +1203,8 @@ function renderSidebar(){
       {id:'dashboard', label:'Dashboard', icon:'dashboard'},
     ]},
     {group:'Work Items', items:[
-      {id:'projects', label:'Projects', icon:'project', count:DB.projects.length},
-      {id:'devtool', label:'HOXT Projects', icon:'layers'},
+      {id:'projects', label:'HOXT Projects', icon:'project', count:DB.projects.length},
+      {id:'devtool', label:'Dev-tool', icon:'cicd'},
       {id:'apis', label:'APIs', icon:'cicd'},
       {id:'cloudenh', label:'Cloud-Enhancements', icon:'cicd'},
       {id:'onpremenh', label:'OnPrem-Enhancements', icon:'cicd'},
@@ -1260,8 +1260,8 @@ function initials(name){ return name.split(' ').map(s=>s[0]).slice(0,2).join('')
 function renderTopbar(){
   const titles = {
     dashboard:['Summary Dashboard',''],
-    projects:['Projects','All Healthy Options Projects'],
-    devtool:['HOXT Projects','Repository, release notes & per-project versions for HOXT - Developer\'s Tool'],
+    projects:['HOXT Projects','Repository info, current version, release notes and per-project object counts'],
+    devtool:['Dev-tool','Objects, Object ID, Description & Version — synced from GitHub'],
     apis:['APIs','Objects, Object ID, Description & Version — synced from GitHub'],
     cloudenh:['Cloud-Enhancements','Objects, Object ID, Description & Version — synced from GitHub'],
     onpremenh:['OnPrem-Enhancements','Objects, Object ID, Description & Version — synced from GitHub'],
@@ -1295,8 +1295,8 @@ function renderTopbar(){
 function renderView(){
   switch(state.view){
     case 'dashboard': return viewDashboard();
-    case 'projects': return viewEntityList('project');
-    case 'devtool': return viewHoxtProjects();
+    case 'projects': return viewHoxtProjects();
+    case 'devtool': return viewDevSource('devtool');
     case 'apis': return viewDevSource('apis');
     case 'cloudenh': return viewDevSource('cloudenh');
     case 'onpremenh': return viewDevSource('onpremenh');
