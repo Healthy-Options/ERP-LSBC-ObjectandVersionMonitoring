@@ -567,10 +567,13 @@ async function flushSaveToSharePoint(){
   try{
     // Extension Management (connection settings + snapshots) is stored in
     // GitHub (extmgmt-data.json), not SharePoint — see saveExtMgmtToGithub().
-    // Everything else in DB still goes to SharePoint as before.
+    // Dev-tool Sync connection + results likewise live in GitHub
+    // (dev-tool-data.json) — see saveDevToolSyncToGithub(). Everything
+    // else in DB still goes to SharePoint as before.
     const payload = {...DB, settings:{...DB.settings}};
     delete payload.settings.extMgmt;
     delete payload.extSnapshots;
+    delete payload.settings.devToolSync;
     await saveDbToSharePointNow(payload);
     syncStatus = 'synced'; lastSyncedAt = new Date().toISOString(); syncError = '';
   }catch(e){
@@ -890,6 +893,7 @@ function paint(){
   else {
     render();
     loadExtMgmtFromGithub().then(loaded=>{ if(loaded) render(); }).catch(e=>console.warn('Extension Management GitHub load failed:', e.message));
+    loadDevToolDataFromGithub().then(loaded=>{ if(loaded) render(); }).catch(e=>console.warn('Dev-tool GitHub load failed:', e.message));
   }
 }
 function boot(){
@@ -1181,7 +1185,12 @@ function canViewNav(navId){
 function setView(v){
   if(!canViewNav(v)){ toast("You don't have permission to view that section.", 'warning'); return; }
   state.view=v; state.search=''; state.statusFilter=''; state.kindFilter=''; render();
-  if(typeof DEV_SOURCES!=='undefined' && DEV_SOURCES[v]) autoSyncDevSourceIfReady(v);
+  // Lightweight, unauthenticated refresh of this source's synced data (no PAT
+  // involved — see loadDevToolDataFromGithub) so the page shows the latest
+  // GitHub Actions result without the person having to remember to refresh.
+  if(typeof DEV_SOURCES!=='undefined' && DEV_SOURCES[v]){
+    loadDevToolDataFromGithub().then(loaded=>{ if(loaded && state.view===v) render(); }).catch(e=>console.warn('Dev-tool GitHub load failed:', e.message));
+  }
 }
 function render(){
   document.documentElement.setAttribute('data-theme', DB.settings.theme);
@@ -1561,7 +1570,7 @@ function viewUsers(){
 
 /* ---------------------------- SETTINGS VIEW ---------------------------- */
 function viewSettings(){
-  const tabs = [['general','General'],['repos','Repositories'],['excel','Excel Import/Export'],['appearance','Appearance'],['objecttypes','Object Types'],['ranges','ID Ranges'],['password','Password Policy'],['extmgmt','Extension Management']];
+  const tabs = [['general','General'],['repos','Repositories'],['excel','Excel Import/Export'],['appearance','Appearance'],['objecttypes','Object Types'],['ranges','ID Ranges'],['password','Password Policy'],['extmgmt','Extension Management'],['devtoolsync','Dev-tool Sync']];
   return `
   <div class="tabs">
     ${tabs.map(([id,label])=>`<div class="tab ${state.settingsTab===id?'active':''}" data-stab="${id}">${label}</div>`).join('')}
@@ -1574,6 +1583,7 @@ function viewSettings(){
   ${state.settingsTab==='ranges'?settingsRanges():''}
   ${state.settingsTab==='password'?settingsPasswordPolicy():''}
   ${state.settingsTab==='extmgmt'?settingsExtMgmt():''}
+  ${state.settingsTab==='devtoolsync'?settingsDevToolSync():''}
   `;
 }
 function settingsRepositories(){
@@ -2222,152 +2232,363 @@ function openHoxtNoteEditModal(id){
   };
 }
 
+/* ======================================================================
+   DEV SOURCES — four sidebar pages (Dev-tool, APIs, Cloud-Enhancements,
+   OnPrem-Enhancements) showing Objects / Object ID / Description /
+   Version pulled from a private AL repo in the same GitHub org as your
+   CI/CD-connected repo, but a different repo.
+
+   Like Extension Management above, this can't run as a plain browser
+   fetch: reading a PRIVATE repo needs a token, and a token able to read
+   another org repo has no business sitting in browser JavaScript where
+   anyone with dev tools open could lift it. So the actual reading runs
+   server-side, in a GitHub Actions workflow in your CI/CD repo, using a
+   PAT stored as a repo secret (AL_SOURCE_PAT) that never reaches this
+   tab. The workflow commits the results as dev-tool-data.json in that
+   same repo; the browser then just does a plain, unauthenticated fetch
+   of that file via raw.githubusercontent.com — no token, no CORS issue,
+   the same trick extmgmt-data.json already relies on above.
+   ====================================================================== */
 const DEV_SOURCES = {
+  devtool:   { label:'Dev-tool' },
   apis:      { label:'APIs' },
   cloudenh:  { label:'Cloud-Enhancements' },
   onpremenh: { label:'OnPrem-Enhancements' },
 };
-const devToolLastError = {}; // key -> most recent sync error message, shown inline until the next attempt
-function devSourceCfg(key){
-  const store = DB.settings.devSources || (DB.settings.devSources = {});
-  return store[key] || (store[key] = { owner:'', repo:'', branch:'main', folder:'', version:null, lastSyncedAt:null, fileShas:{}, objects:[] });
-}
-function devToolTokenKey(key){ return `bcovc_devtool_token_${key}`; }
-function devToolTokenRemember(key){ return localStorage.getItem(`bcovc_devtool_token_remember_${key}`) === '1'; }
-function setDevToolTokenRemember(key, v){ if(v) localStorage.setItem(`bcovc_devtool_token_remember_${key}`,'1'); else { localStorage.removeItem(`bcovc_devtool_token_remember_${key}`); localStorage.removeItem(devToolTokenKey(key)); } }
-function devToolToken(key){ return sessionStorage.getItem(devToolTokenKey(key)) || (devToolTokenRemember(key) ? (localStorage.getItem(devToolTokenKey(key))||'') : ''); }
-function setDevToolToken(key, t){
-  if(t){ sessionStorage.setItem(devToolTokenKey(key), t); if(devToolTokenRemember(key)) localStorage.setItem(devToolTokenKey(key), t); }
-  else { sessionStorage.removeItem(devToolTokenKey(key)); localStorage.removeItem(devToolTokenKey(key)); }
-}
-async function devToolApi(owner, repo, path, token){
-  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
-    headers:{ 'Authorization':`Bearer ${token}`, 'Accept':'application/vnd.github+json' }
+const DEVTOOL_DATA_PATH = 'dev-tool-data.json';
+function devToolSyncSettings(){
+  return DB.settings.devToolSync || (DB.settings.devToolSync = {
+    sources: {
+      devtool:   { owner:'', repo:'', branch:'main', folder:'' },
+      apis:      { owner:'', repo:'', branch:'main', folder:'' },
+      cloudenh:  { owner:'', repo:'', branch:'main', folder:'' },
+      onpremenh: { owner:'', repo:'', branch:'main', folder:'' },
+    },
+    lastRunAt:null, lastRunStatus:'', lastRunError:'',
   });
-  let body=null; try{ body = await res.json(); }catch(e){}
-  if(!res.ok) throw new Error((body&&body.message)||`GitHub API error (${res.status})`);
+}
+function devToolDataRawUrl(){
+  const gh = ghSettings();
+  if(!gh.owner || !gh.repo) return null;
+  // Cache-busted, same reasoning as extMgmtDataRawUrl() — raw.githubusercontent.com
+  // caches aggressively (~5 min), which would otherwise mask a just-triggered sync.
+  return `https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${gh.branch||'main'}/${DEVTOOL_DATA_PATH}?t=${Date.now()}`;
+}
+// Reads dev-tool-data.json straight from the repo — no auth, which is why this
+// works from the browser even though the AL source repos themselves are
+// private. Returns true if data was found and merged in.
+async function loadDevToolDataFromGithub(){
+  const url = devToolDataRawUrl();
+  if(!url) return false;
+  const res = await fetch(url);
+  if(res.status === 404) return false;
+  if(!res.ok) throw new Error(`Could not read Dev-tool sync data from GitHub (HTTP ${res.status}).`);
+  const data = await res.json();
+  const local = devToolSyncSettings();
+  Object.keys(DEV_SOURCES).forEach(key=>{
+    const remote = (data.sources||{})[key];
+    if(!remote) return;
+    local.sources[key] = {
+      owner: remote.owner||'', repo: remote.repo||'', branch: remote.branch||'main', folder: remote.folder||'',
+      version: remote.version||null, objects: remote.objects||[], lastSyncedAt: remote.lastSyncedAt||null,
+    };
+  });
+  local.lastRunAt = data.lastRunAt||null;
+  local.lastRunStatus = data.lastRunStatus||'';
+  local.lastRunError = data.lastRunError||'';
+  return true;
+}
+// Writes just the connection config (owner/repo/branch/folder per source) to
+// dev-tool-data.json — re-reads first and keeps each source's version/objects/
+// lastSyncedAt plus the top-level lastRunAt/Status/Error exactly as GitHub
+// Actions last left them, so a config-only save from this tab can never
+// clobber a sync result the workflow committed moments earlier. Serialized
+// through devToolSaveChain, same reasoning as extMgmtSaveChain above.
+let devToolSaveChain = Promise.resolve();
+function saveDevToolSyncToGithub(commitMessage){
+  const run = ()=> saveDevToolSyncToGithubImpl(commitMessage);
+  const next = devToolSaveChain.then(run, run);
+  devToolSaveChain = next.catch(()=>{});
+  return next;
+}
+async function saveDevToolSyncToGithubImpl(commitMessage){
+  const gh = ghSettings();
+  if(!gh.owner || !gh.repo || !ghToken()) throw new Error('Connect GitHub on the CI/CD tab first (owner, repo, token with Contents: Read & write).');
+  const localSources = {...devToolSyncSettings().sources};
+  let remoteData = null;
+  try{ const loaded = await loadDevToolDataFromGithub(); if(loaded) remoteData = devToolSyncSettings(); }catch(e){ /* no remote copy yet, or unreachable — proceed with local-only data */ }
+  const merged = { sources:{}, lastRunAt: remoteData?remoteData.lastRunAt:null, lastRunStatus: remoteData?remoteData.lastRunStatus:'', lastRunError: remoteData?remoteData.lastRunError:'' };
+  Object.keys(DEV_SOURCES).forEach(key=>{
+    const remoteSrc = remoteData ? remoteData.sources[key] : null;
+    merged.sources[key] = {
+      owner: localSources[key].owner, repo: localSources[key].repo, branch: localSources[key].branch||'main', folder: localSources[key].folder||'',
+      version: remoteSrc?remoteSrc.version:null, objects: remoteSrc?remoteSrc.objects:[], lastSyncedAt: remoteSrc?remoteSrc.lastSyncedAt:null,
+    };
+  });
+  DB.settings.devToolSync = merged;
+  await githubPutFile(DEVTOOL_DATA_PATH, JSON.stringify(merged, null, 2), commitMessage || `Update Dev-tool sync config (${new Date().toISOString()})`);
+}
+async function dispatchDevToolSyncWorkflow(){
+  const gh = ghSettings();
+  if(!gh.owner || !gh.repo || !ghToken()) throw new Error('Connect GitHub on the CI/CD tab first (owner, repo, token with Actions: Read & write) and push the sync automation.');
+  const res = await fetch(`https://api.github.com/repos/${gh.owner}/${gh.repo}/actions/workflows/dev-tool-sync.yml/dispatches`, {
+    method:'POST',
+    headers:{ 'Authorization':`Bearer ${ghToken()}`, 'Accept':'application/vnd.github+json', 'Content-Type':'application/json' },
+    body: JSON.stringify({ ref: gh.branch || 'main' }),
+  });
+  if(res.status !== 204){
+    let body = null; try{ body = await res.json(); }catch(e){}
+    let msg = (body && body.message) || `GitHub API error (HTTP ${res.status})`;
+    if(/resource not accessible/i.test(msg)){
+      msg = `${msg} — triggering a workflow run needs a separate "Actions: Read and write" permission on the token (Contents/Workflows alone don't cover it). Also confirm the token's repository access includes this repo, and that the workflow file has been pushed to the repo's default branch.`;
+    }
+    throw new Error(msg);
+  }
+}
+
+function devToolSyncScriptJs(){
+  return `/*
+ * Dev-tool Object Sync — unattended runner for GitHub Actions.
+ *
+ * Reads Objects / Object ID / Description / Version out of PRIVATE AL
+ * source repos (same GitHub org, different repos from this one) for four
+ * sources — Dev-tool, APIs, Cloud-Enhancements, OnPrem-Enhancements —
+ * and writes the results into dev-tool-data.json at this repo's root.
+ *
+ * Runs server-side so the AL_SOURCE_PAT secret below (which needs read
+ * access to those other, private repos) never has to sit in browser
+ * JavaScript. The app's browser tab only ever reads the *output* file,
+ * dev-tool-data.json, via a plain unauthenticated fetch — it never talks
+ * to the AL source repos directly.
+ *
+ * Required repo secret (Settings > Secrets and variables > Actions):
+ *   AL_SOURCE_PAT   A GitHub PAT with Contents: Read-only, scoped to
+ *                   the AL source repo(s) used by the sources below.
+ *
+ * dev-tool-data.json's "sources" object (owner/repo/branch/folder per
+ * key) is edited from the app itself (Settings > Dev-tool Sync) and
+ * committed here before this script ever runs — this script only fills
+ * in version / objects / lastSyncedAt for each source, using whatever
+ * owner/repo/branch/folder is already on record for it.
+ */
+
+const AL_SOURCE_PAT = process.env.AL_SOURCE_PAT;
+const fs = require('fs');
+const path = require('path');
+const DATA_FILE = path.join(process.cwd(), 'dev-tool-data.json');
+
+function fail(msg) {
+  console.error(\`::error::\${msg}\`);
+  process.exit(1);
+}
+
+async function ghApi(owner, repo, apiPath) {
+  const res = await fetch(\`https://api.github.com/repos/\${owner}/\${repo}\${apiPath}\`, {
+    headers: { 'Authorization': \`Bearer \${AL_SOURCE_PAT}\`, 'Accept': 'application/vnd.github+json' },
+  });
+  const body = await res.json().catch(()=>null);
+  if (!res.ok) throw new Error((body && body.message) || \`GitHub API error (HTTP \${res.status})\`);
   return body;
 }
-function devToolDecodeB64(b64){ return decodeURIComponent(escape(atob(b64.replace(/\n/g,'')))); }
-// Matches AL object declarations: "table 50100 "My Table"", "codeunit 50101 Foo {",
-// "tableextension 50102 "My Ext" extends "Customer"", etc.
-const DEVTOOL_AL_OBJECT_RE = /^\s*(table|tableextension|page|pageextension|pagecustomization|report|reportextension|codeunit|query|xmlport|enum|enumextension|permissionset|permissionsetextension|profile|controladdin|interface)\s+(\d+)\s+"?([^"\r\n{]+?)"?\s*(\{|extends)/gim;
-function devToolParseAlObjects(text){
-  const out=[]; let m; DEVTOOL_AL_OBJECT_RE.lastIndex=0;
-  while((m = DEVTOOL_AL_OBJECT_RE.exec(text))) out.push({ type:m[1].toLowerCase(), id:Number(m[2]), name:m[3].trim() });
+function decodeB64Utf8(b64) { return Buffer.from(b64.replace(/\\n/g, ''), 'base64').toString('utf8'); }
+
+const AL_OBJECT_RE = /^\\s*(table|tableextension|page|pageextension|pagecustomization|report|reportextension|codeunit|query|xmlport|enum|enumextension|permissionset|permissionsetextension|profile|controladdin|interface)\\s+(\\d+)\\s+"?([^"\\r\\n{]+?)"?\\s*(\\{|extends)/gim;
+function parseAlObjects(text) {
+  const out = []; let m; AL_OBJECT_RE.lastIndex = 0;
+  while ((m = AL_OBJECT_RE.exec(text))) out.push({ type: m[1].toLowerCase(), id: Number(m[2]), name: m[3].trim() });
   return out;
 }
-const devToolFileCache = {}; // key -> { path: text }, in-memory only, rebuilt each session
-// Pulls the repo's file tree once, then only downloads files whose blob sha
-// changed since the last sync (cached in cfg.fileShas) — so a repeat sync
-// with nothing changed costs a single API call.
-async function syncDevSource(key, silent){
-  const cfg = devSourceCfg(key);
-  const token = devToolToken(key);
-  if(!cfg.owner || !cfg.repo || !token){
-    if(!silent) toast('Fill in Owner, Repo and Token first.', 'warning');
-    return false;
-  }
-  try{
-    const tree = await devToolApi(cfg.owner, cfg.repo, `/git/trees/${encodeURIComponent(cfg.branch||'main')}?recursive=1`, token);
-    const scoped = (tree.tree||[]).filter(e=> e.type==='blob' && (!cfg.folder || e.path===cfg.folder || e.path.startsWith(cfg.folder+'/')));
-    const entries = scoped.filter(e=> e.path.endsWith('.al') || /(^|\/)app\.json$/.test(e.path));
-    const prevShas = cfg.fileShas || {}, newShas = {};
-    const changedPaths = new Set();
-    entries.forEach(e=>{ newShas[e.path]=e.sha; if(prevShas[e.path]!==e.sha) changedPaths.add(e.path); });
-    const removedPaths = Object.keys(prevShas).filter(p=>!(p in newShas));
 
-    const cache = devToolFileCache[key] || (devToolFileCache[key] = {});
-    let appMeta = null;
-    const objects = [];
-    for(const e of entries){
-      let text = (!changedPaths.has(e.path) && cache[e.path]) ? cache[e.path] : null;
-      if(text===null){
-        const blob = await devToolApi(cfg.owner, cfg.repo, `/git/blobs/${e.sha}`, token);
-        text = devToolDecodeB64(blob.content);
-        cache[e.path] = text;
-      }
-      if(e.path.endsWith('app.json')){ try{ appMeta = JSON.parse(text); }catch(_){} }
-      else objects.push(...devToolParseAlObjects(text));
+async function syncOneSource(key, cfg) {
+  if (!cfg.owner || !cfg.repo) { console.log(\`[\${key}] not configured yet — skipping.\`); return cfg; }
+  const tree = await ghApi(cfg.owner, cfg.repo, \`/git/trees/\${encodeURIComponent(cfg.branch || 'main')}?recursive=1\`);
+  const scoped = (tree.tree || []).filter(e => e.type === 'blob' && (!cfg.folder || e.path === cfg.folder || e.path.startsWith(cfg.folder + '/')));
+  const entries = scoped.filter(e => e.path.endsWith('.al') || /(^|\\/)app\\.json$/.test(e.path));
+  let appMeta = null;
+  const objects = [];
+  for (const e of entries) {
+    const blob = await ghApi(cfg.owner, cfg.repo, \`/git/blobs/\${e.sha}\`);
+    const text = decodeB64Utf8(blob.content);
+    if (e.path.endsWith('app.json')) { try { appMeta = JSON.parse(text); } catch (_) {} }
+    else objects.push(...parseAlObjects(text));
+  }
+  const byKey = {};
+  objects.forEach(o => { byKey[\`\${o.type}:\${o.id}\`] = { objectType: o.type, objectId: o.id, description: o.name }; });
+  console.log(\`[\${key}] \${cfg.owner}/\${cfg.repo}@\${cfg.branch || 'main'} — \${Object.keys(byKey).length} object(s)\${appMeta && appMeta.version ? \`, version \${appMeta.version}\` : ''}\`);
+  return {
+    owner: cfg.owner, repo: cfg.repo, branch: cfg.branch || 'main', folder: cfg.folder || '',
+    version: (appMeta && appMeta.version) || cfg.version || null,
+    objects: Object.values(byKey),
+    lastSyncedAt: new Date().toISOString(),
+  };
+}
+
+async function main() {
+  if (!AL_SOURCE_PAT) fail('Missing AL_SOURCE_PAT secret.');
+  if (!fs.existsSync(DATA_FILE)) fail(\`\${DATA_FILE} not found — save the connection config from the app first (Settings > Dev-tool Sync > Save Connection).\`);
+  const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  data.sources = data.sources || {};
+  let lastRunError = '';
+  for (const key of Object.keys(data.sources)) {
+    try {
+      data.sources[key] = await syncOneSource(key, data.sources[key]);
+    } catch (err) {
+      lastRunError += \`[\${key}] \${err.message}\\n\`;
+      console.error(\`::warning::\${key} sync failed: \${err.message}\`);
     }
-    removedPaths.forEach(p=> delete cache[p]);
-
-    if(appMeta && appMeta.version) cfg.version = appMeta.version;
-    cfg.objects = cfg.objects || [];
-    let added=0, updated=0;
-    objects.forEach(o=>{
-      const typeRec = DB.settings.objectTypes.find(t=>t.code.toUpperCase()===o.type.slice(0,3).toUpperCase()) || DB.settings.objectTypes[0];
-      const dup = cfg.objects.find(x=>x.objectType===typeRec.id && x.objectId===o.id);
-      if(!dup){ cfg.objects.push({id:uid(), objectType:typeRec.id, objectId:o.id, description:o.name}); added++; }
-      else { dup.description = o.name; updated++; }
-    });
-
-    cfg.fileShas = newShas; cfg.lastSyncedAt = new Date().toISOString();
-    delete devToolLastError[key];
-    saveDB();
-    log('Synced','github', DEV_SOURCES[key].label, `${cfg.owner}/${cfg.repo}@${cfg.branch||'main'} — ${added} new, ${updated} updated object(s)`);
-    if(!silent) toast(`Synced: ${added} new, ${updated} updated object(s).`, 'success');
-    return true;
-  }catch(err){
-    devToolLastError[key] = err.message || String(err);
-    console.error(`[Dev-tool] "${key}" GitHub sync failed:`, err); // always logged, even on silent auto-sync
-    if(!silent) toast(`GitHub sync failed: ${err.message}`, 'danger');
-    return false;
   }
+  data.lastRunAt = new Date().toISOString();
+  data.lastRunStatus = lastRunError ? 'error' : 'success';
+  data.lastRunError = lastRunError.trim();
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  if (lastRunError) fail(\`One or more sources failed:\\n\${lastRunError}\`);
 }
-// Called right after navigating into a dev-source page. If credentials are
-// already saved, syncs silently in the background and re-renders when done
-// — the whole point being the user only has to type in credentials once.
-async function autoSyncDevSourceIfReady(key){
-  const cfg = devSourceCfg(key);
-  const token = devToolToken(key);
-  if(!cfg.owner || !cfg.repo || !token) return;
-  const statusEl = document.getElementById('dtStatus');
-  if(statusEl){ statusEl.textContent = 'Auto-syncing…'; statusEl.style.color = 'var(--text-faint)'; }
-  await syncDevSource(key, true);
-  if(state.view===key) render(); // reflects either the refreshed objects table or the persistent error banner
+
+main();
+`;
 }
+
+function devToolSyncWorkflowYaml(){
+  return `name: Dev-tool Object Sync
+
+on:
+  schedule:
+    # Cron is UTC only and does not adjust for DST. 16:30 UTC = 12:30 AM
+    # Philippine Time (UTC+8) — offset 30 min from the BC Extension Snapshot
+    # job so the two don't start at the exact same minute. Edit directly in
+    # GitHub if your target timezone changes.
+    - cron: '30 16 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Run Dev-tool sync
+        env:
+          AL_SOURCE_PAT: \${{ secrets.AL_SOURCE_PAT }}
+        run: node scripts/run-dev-tool-sync.js
+
+      - name: Commit updated sync data
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dev-tool-data.json 2>/dev/null || { echo "dev-tool-data.json not present — nothing to commit."; exit 0; }
+          git diff --cached --quiet && echo "No changes to commit." || git commit -m "Dev-tool sync ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push
+`;
+}
+async function pushDevToolSyncScriptToGithub(){
+  ghStatus('Pushing Dev-tool sync script…');
+  try{
+    await githubPutFile('scripts/run-dev-tool-sync.js', devToolSyncScriptJs(), `Add/update Dev-tool sync script (${new Date().toISOString()})`);
+    log('Exported','github', 'scripts/run-dev-tool-sync.js', `Pushed to ${ghSettings().owner}/${ghSettings().repo}@${ghSettings().branch||'main'}`);
+    ghStatus('Dev-tool sync script pushed.', 'success');
+    toast('Dev-tool sync script pushed to GitHub.', 'success');
+  }catch(err){ ghStatus(`Failed: ${err.message}`, 'error'); toast(`GitHub push failed: ${err.message}`, 'danger'); }
+}
+async function pushDevToolSyncWorkflowToGithub(){
+  ghStatus('Pushing Dev-tool sync workflow…');
+  const path = '.github/workflows/dev-tool-sync.yml';
+  try{
+    await githubPutFile(path, devToolSyncWorkflowYaml(), `Add/update Dev-tool sync workflow (${new Date().toISOString()})`);
+    log('Exported','github', path, `Pushed to ${ghSettings().owner}/${ghSettings().repo}@${ghSettings().branch||'main'}`);
+    ghStatus('Dev-tool sync workflow pushed.', 'success');
+    toast('Dev-tool sync workflow pushed to GitHub.', 'success');
+  }catch(err){ const msg = friendlyGhError(err, path); ghStatus(`Failed: ${msg}`, 'error'); toast(`GitHub push failed: ${msg}`, 'danger'); }
+}
+async function pushDevToolSyncAutomationToGithub(){
+  await pushDevToolSyncScriptToGithub();
+  await pushDevToolSyncWorkflowToGithub();
+}
+
+function settingsDevToolSync(){
+  const dt = devToolSyncSettings();
+  const canEdit = can('setup','modify');
+  const gh = ghSettings();
+  const repoUrl = gh.owner && gh.repo ? `https://github.com/${gh.owner}/${gh.repo}` : '';
+  const syncReady = !!(gh.owner && gh.repo && ghToken());
+  return `
+  <div class="card" style="margin-bottom:18px;background:var(--accent-soft, rgba(99,102,241,0.08));">
+    <p style="font-size:12px;color:var(--text-dim);margin:0;">${icon('alert')} <b>Direct browser sync isn't possible here either.</b> The AL source repo is private, and a token able to read it has no business sitting in this browser tab where anyone with dev tools open could copy it out. All reading — scheduled and on-demand — runs through <b>GitHub Actions</b> instead, using a token stored as a repo secret that never reaches the browser. Fill in each source's repo details below (read by that job), then use <b>Run Sync Now</b> to trigger it on demand.</p>
+  </div>
+
+  <div class="card" style="margin-bottom:18px;">
+    <div class="section-title"><h3>${icon('cicd')} Source Repositories</h3><span class="hint">Same GitHub org as your CI/CD repo, different (private) repo — one row per sidebar page</span></div>
+    ${Object.keys(DEV_SOURCES).map(key=>{
+      const src = dt.sources[key];
+      return `
+      <div style="padding:12px 0;border-top:1px solid var(--border);">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">${escapeHtml(DEV_SOURCES[key].label)}</div>
+        <div class="form-grid">
+          <div class="form-row"><label>Owner / Org</label><input type="text" id="dts_${key}_owner" value="${escapeAttr(src.owner)}" placeholder="e.g. my-company" ${canEdit?'':'disabled'}></div>
+          <div class="form-row"><label>Repository</label><input type="text" id="dts_${key}_repo" value="${escapeAttr(src.repo)}" placeholder="e.g. bc-al-projects" ${canEdit?'':'disabled'}></div>
+          <div class="form-row"><label>Branch</label><input type="text" id="dts_${key}_branch" value="${escapeAttr(src.branch||'main')}" placeholder="main" ${canEdit?'':'disabled'}></div>
+          <div class="form-row"><label>Folder <span class="hint">(optional)</span></label><input type="text" id="dts_${key}_folder" value="${escapeAttr(src.folder||'')}" placeholder="apps/warehouse" ${canEdit?'':'disabled'}></div>
+        </div>
+        <div style="font-size:12px;color:var(--text-faint);">${src.lastSyncedAt?`Last synced ${timeAgo(src.lastSyncedAt)} — ${(src.objects||[]).length} object(s)${src.version?`, version ${escapeHtml(src.version)}`:''}`:'Never synced yet.'}</div>
+      </div>`;
+    }).join('')}
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
+      ${canEdit?`<button class="btn" id="saveDevToolSyncConn">Save Connection</button>`:''}
+      <button class="btn btn-primary" id="runDevToolSyncNow" ${syncReady?'':'disabled'} title="${syncReady?'':'Connect GitHub on the CI/CD tab first'}">${icon('upload')} Run Sync Now (via GitHub Actions)</button>
+      <button class="btn btn-ghost" id="refreshDevToolSync">${icon('history')} Refresh from GitHub</button>
+    </div>
+    <div style="margin-top:10px;font-size:12px;color:var(--text-faint);">
+      ${dt.lastRunAt
+        ? `Last run: ${timeAgo(dt.lastRunAt)} — ${dt.lastRunStatus==='error'?`<span style="color:var(--danger);">issues: ${escapeHtml(dt.lastRunError||'')}</span>`:'<span style="color:var(--success);">success</span>'}`
+        : 'No sync has run yet.'}
+      <br>Triggering a run doesn't finish instantly — GitHub usually takes under a minute. Click <b>Refresh from GitHub</b> after that (or reload the page) to pull in the result.
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px;">
+    <div class="section-title"><h3>${icon('cicd')} Automate with GitHub Actions</h3><span class="hint">Runs on GitHub's own servers, on schedule — works even if this app is never opened</span></div>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:12px;">Pushes a workflow + script into <span class="mono">${gh.owner&&gh.repo?`${escapeHtml(gh.owner)}/${escapeHtml(gh.repo)}`:'your connected repo'}</span> (set up on the <b>CI/CD</b> tab). Like Extension Management, this feature's data lives <b>in that repo</b> (<span class="mono">${DEVTOOL_DATA_PATH}</span>) rather than in the shared SharePoint database — Projects, Tickets, Store Customization, Users and the rest of Settings are unaffected.</p>
+    <ol style="font-size:12.5px;color:var(--text-dim);line-height:1.8;padding-left:20px;margin-bottom:14px;">
+      <li>Connect a repo on the <b>CI/CD</b> tab first (owner, repo, branch, token with Contents + Workflows + Actions: Read &amp; write)</li>
+      <li>Fill in each source's owner/repo/branch above and click <b>Save Connection</b> — this creates <span class="mono">${DEVTOOL_DATA_PATH}</span> in the repo for the first time</li>
+      <li>Click <b>Push Sync Automation to GitHub</b> below</li>
+      <li>In the AL source repo's <span class="mono">Settings &gt; Developer settings</span>, create a fine-grained PAT scoped to just that repo with <b>Contents: Read-only</b> — then in <span class="mono">${gh.owner&&gh.repo?`${escapeHtml(gh.owner)}/${escapeHtml(gh.repo)}`:'this repo'}'s Settings &gt; Secrets and variables &gt; Actions</span>, add it as a secret named <span class="mono">AL_SOURCE_PAT</span></li>
+      <li>The workflow runs daily at 16:30 UTC (12:30 AM Philippine Time) — edit the cron line directly in GitHub if a different timezone applies</li>
+    </ol>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-primary" id="pushDevToolSyncGh" ${gh.owner&&gh.repo&&ghToken()?'':'disabled'}>${icon('upload')} Push Sync Automation to GitHub</button>
+      ${repoUrl?`<a class="btn btn-ghost" href="${repoUrl}/actions" target="_blank" rel="noopener">${icon('eye')} View Actions on GitHub</a>`:''}
+    </div>
+  </div>`;
+}
+
 function viewDevSource(key){
-  const cfg = devSourceCfg(key);
+  const dt = devToolSyncSettings();
+  const cfg = dt.sources[key];
   const label = DEV_SOURCES[key].label;
-  const canEdit = can('projects','modify');
   const objRows = (cfg.objects||[]).slice().sort((a,b)=>a.objectId-b.objectId).map(o=>{
-    const t = typeById(o.objectType);
-    return `<tr><td class="mono">${t?t.code:'—'}</td><td class="mono">${o.objectId}</td><td>${escapeHtml(o.description||'')}</td></tr>`;
+    return `<tr><td class="mono">${escapeHtml((o.objectType||'').toUpperCase())}</td><td class="mono">${o.objectId}</td><td>${escapeHtml(o.description||'')}</td></tr>`;
   }).join('');
   return `
   <div class="filter-bar">
     ${cfg.version?vchip(cfg.version):''}
     <span class="hint" style="color:var(--text-faint);font-size:12px;">${cfg.lastSyncedAt?`Last synced ${timeAgo(cfg.lastSyncedAt)}`:'Never synced yet'}</span>
-  </div>
-  <div class="card" style="margin-bottom:18px;">
-    <div class="section-title"><h3>${icon('cicd')} GitHub Source</h3><span class="hint">Reads Objects, Object ID, Description and Version directly from this repo — no CI/CD pipeline involved. Once saved, this page auto-syncs every time you open it.</span></div>
-    <div class="form-grid">
-      <div class="form-row"><label>Owner / Org</label><input type="text" id="dtOwner" value="${escapeAttr(cfg.owner)}" placeholder="e.g. my-company" ${canEdit?'':'disabled'}></div>
-      <div class="form-row"><label>Repository</label><input type="text" id="dtRepo" value="${escapeAttr(cfg.repo)}" placeholder="e.g. bc-al-projects" ${canEdit?'':'disabled'}></div>
-      <div class="form-row"><label>Branch</label><input type="text" id="dtBranch" value="${escapeAttr(cfg.branch||'main')}" placeholder="main" ${canEdit?'':'disabled'}></div>
-      <div class="form-row"><label>Folder <span class="hint">(optional — blank = whole repo)</span></label><input type="text" id="dtFolder" value="${escapeAttr(cfg.folder||'')}" placeholder="apps/warehouse" ${canEdit?'':'disabled'}></div>
-    </div>
-    <div class="form-row">
-      <label>GitHub Token <span class="hint">(fine-grained, Contents: Read-only, scoped to this repo)</span></label>
-      <input type="password" id="dtToken" value="${escapeAttr(devToolToken(key))}" placeholder="github_pat_..." ${canEdit?'':'disabled'}>
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;margin-top:4px;">
-        <input type="checkbox" id="dtTokenRemember" ${devToolTokenRemember(key)?'checked':''} ${canEdit?'':'disabled'}>
-        Remember on this device
-      </label>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px;">
-      ${canEdit?`<button class="btn btn-primary" id="dtSyncBtn">${icon('upload')} Save &amp; Sync Now</button>`:''}
-    </div>
-    <div id="dtStatus" style="font-size:12px;color:var(--text-faint);margin-top:8px;"></div>
-    ${devToolLastError[key] ? `<div style="margin-top:10px;padding:10px 12px;border-radius:8px;background:rgba(220,53,69,0.1);border:1px solid var(--danger);color:var(--danger);font-size:12.5px;font-weight:600;">${icon('warning')||''} Last sync error: ${escapeHtml(devToolLastError[key])}</div>` : ''}
+    ${cfg.owner&&cfg.repo?`<a class="btn btn-ghost btn-sm" href="https://github.com/${escapeAttr(cfg.owner)}/${escapeAttr(cfg.repo)}" target="_blank" rel="noopener">${icon('github')||''} View Repo</a>`:''}
+    ${can('setup','view')?`<button class="btn btn-ghost btn-sm" id="dsGoToSettings" style="margin-left:auto;">${icon('settings')} Configure / Sync</button>`:''}
   </div>
   <div class="card" style="padding:0;">
     <div class="section-title" style="padding:16px 18px 0;"><h3>${escapeHtml(label)} Objects <span class="hint" style="font-weight:400;">(${(cfg.objects||[]).length})</span></h3></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Type</th><th>Object ID</th><th>Description</th></tr></thead>
-        <tbody id="dtObjRows">${objRows || `<tr class="empty-row"><td colspan="3">${icon('search')}<br>No objects synced yet — fill in the repo details above and click Save &amp; Sync Now.</td></tr>`}</tbody>
+        <tbody>${objRows || `<tr class="empty-row"><td colspan="3">${icon('search')}<br>Not synced yet — connect this source under Settings &gt; Dev-tool Sync and run a sync.</td></tr>`}</tbody>
       </table>
     </div>
   </div>`;
@@ -3894,24 +4115,59 @@ function attachContentHandlers(){
     el.addEventListener('click', ()=> openHoxtProjectModal(el.dataset.hoxtUpdate));
   });
 
-  const dtSyncBtn = document.getElementById('dtSyncBtn');
-  if(dtSyncBtn){
-    dtSyncBtn.addEventListener('click', async ()=>{
-      const key = state.view;
-      const cfg = devSourceCfg(key);
-      cfg.owner = document.getElementById('dtOwner').value.trim();
-      cfg.repo = document.getElementById('dtRepo').value.trim();
-      cfg.branch = document.getElementById('dtBranch').value.trim() || 'main';
-      cfg.folder = document.getElementById('dtFolder').value.trim();
-      setDevToolTokenRemember(key, document.getElementById('dtTokenRemember').checked);
-      setDevToolToken(key, document.getElementById('dtToken').value.trim());
-      const statusEl = document.getElementById('dtStatus');
-      statusEl.textContent = 'Syncing…'; statusEl.style.color = 'var(--text-faint)';
-      dtSyncBtn.disabled = true;
-      await syncDevSource(key, false); // false: also shows a toast with the exact GitHub error if it fails
-      render(); // shows either the refreshed objects table, or the persistent red error banner
+  const dsGoToSettings = document.getElementById('dsGoToSettings');
+  if(dsGoToSettings) dsGoToSettings.addEventListener('click', ()=>{ state.settingsTab='devtoolsync'; setView('settings'); });
+
+  const saveDevToolSyncConn = document.getElementById('saveDevToolSyncConn');
+  if(saveDevToolSyncConn) saveDevToolSyncConn.addEventListener('click', async ()=>{
+    const dt = devToolSyncSettings();
+    Object.keys(DEV_SOURCES).forEach(key=>{
+      const ownerEl = document.getElementById(`dts_${key}_owner`);
+      if(!ownerEl) return; // section not rendered (view-only permissions)
+      dt.sources[key].owner = ownerEl.value.trim();
+      dt.sources[key].repo = document.getElementById(`dts_${key}_repo`).value.trim();
+      dt.sources[key].branch = document.getElementById(`dts_${key}_branch`).value.trim() || 'main';
+      dt.sources[key].folder = document.getElementById(`dts_${key}_folder`).value.trim();
     });
-  }
+    const original = saveDevToolSyncConn.textContent;
+    saveDevToolSyncConn.disabled = true; saveDevToolSyncConn.textContent = 'Saving…';
+    try{
+      await saveDevToolSyncToGithub(`Update Dev-tool sync connection (${new Date().toISOString()})`);
+      log('Updated','github', DEVTOOL_DATA_PATH, 'Dev-tool sync connection details');
+      toast('Connection saved to GitHub.', 'success');
+    }catch(err){
+      toast(`Could not save to GitHub: ${err.message}`, 'danger');
+    }
+    saveDevToolSyncConn.disabled = false; saveDevToolSyncConn.textContent = original;
+    render();
+  });
+  const runDevToolSyncNow = document.getElementById('runDevToolSyncNow');
+  if(runDevToolSyncNow) runDevToolSyncNow.addEventListener('click', async ()=>{
+    const original = runDevToolSyncNow.textContent;
+    runDevToolSyncNow.disabled = true; runDevToolSyncNow.textContent = 'Triggering…';
+    try{
+      await dispatchDevToolSyncWorkflow();
+      toast('Triggered on GitHub Actions — usually finishes in under a minute. Use "Refresh from GitHub" shortly to see the result.', 'success');
+    }catch(err){
+      toast(`Could not trigger sync: ${err.message}`, 'danger');
+    }
+    runDevToolSyncNow.disabled = false; runDevToolSyncNow.textContent = original;
+  });
+  const refreshDevToolSync = document.getElementById('refreshDevToolSync');
+  if(refreshDevToolSync) refreshDevToolSync.addEventListener('click', async ()=>{
+    const original = refreshDevToolSync.textContent;
+    refreshDevToolSync.disabled = true; refreshDevToolSync.textContent = 'Refreshing…';
+    try{
+      const loaded = await loadDevToolDataFromGithub();
+      toast(loaded ? 'Refreshed from GitHub.' : 'Nothing saved to GitHub yet — click Save Connection first.', loaded?'success':'warning');
+    }catch(err){
+      toast(`Refresh failed: ${err.message}`, 'danger');
+    }
+    refreshDevToolSync.disabled = false; refreshDevToolSync.textContent = original;
+    render();
+  });
+  const pushDevToolSyncGh = document.getElementById('pushDevToolSyncGh');
+  if(pushDevToolSyncGh) pushDevToolSyncGh.addEventListener('click', pushDevToolSyncAutomationToGithub);
 
   document.querySelectorAll('[data-stab]').forEach(el=>{
     el.addEventListener('click', ()=>{ state.settingsTab = el.dataset.stab; render(); });
