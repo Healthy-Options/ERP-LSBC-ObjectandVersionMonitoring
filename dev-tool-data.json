@@ -1,0 +1,43 @@
+{
+  "sources": {
+    "devtool": {
+      "owner": "",
+      "repo": "",
+      "branch": "main",
+      "folder": "",
+      "version": null,
+      "objects": [],
+      "lastSyncedAt": null
+    },
+    "apis": {
+      "owner": "",
+      "repo": "",
+      "branch": "main",
+      "folder": "",
+      "version": null,
+      "objects": [],
+      "lastSyncedAt": null
+    },
+    "cloudenh": {
+      "owner": "Healthy-Options",
+      "repo": "ERP-HOXT-Cloud-Enhancements",
+      "branch": "main",
+      "folder": "",
+      "version": null,
+      "objects": [],
+      "lastSyncedAt": null
+    },
+    "onpremenh": {
+      "owner": "",
+      "repo": "",
+      "branch": "main",
+      "folder": "",
+      "version": null,
+      "objects": [],
+      "lastSyncedAt": null
+    }
+  },
+  "lastRunAt": null,
+  "lastRunStatus": "",
+  "lastRunError": ""
+}
