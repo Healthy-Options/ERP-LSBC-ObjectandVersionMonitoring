@@ -37,7 +37,7 @@
       "lastSyncedAt": null
     }
   },
-  "lastRunAt": "2026-09-24T05:46:14.471Z",
+  "lastRunAt": "2026-09-24T20:03:54.920Z",
   "lastRunStatus": "error",
-  "lastRunError": "[cloudenh] Resource not accessible by personal access token"
+  "lastRunError": "[cloudenh] Not Found"
 }
