@@ -9,6 +9,18 @@ on:
     - cron: '30 16 * * *'
   workflow_dispatch: {}
 
+# Without this, clicking "Run Sync Now" more than once (or a manual run
+# landing mid-schedule) lets multiple runs execute at the same time, all
+# racing to push dev-tool-data.json back to the repo — which is exactly
+# what kept rejecting the push even with retries. Same group name as the
+# BC Extension Snapshot workflow, on purpose: that workflow also commits
+# to this same repo/branch, so without sharing the group the two could
+# still collide with each other even though neither collides with
+# itself anymore. Sharing the group queues them against each other too.
+concurrency:
+  group: bcovc-repo-commits
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
