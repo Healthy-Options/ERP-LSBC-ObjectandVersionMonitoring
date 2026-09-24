@@ -23,9 +23,150 @@
       "repo": "ERP-HOXT-Cloud-Enhancements",
       "branch": "main",
       "folder": "",
-      "version": null,
-      "objects": [],
-      "lastSyncedAt": null
+      "version": "26.9.0.2",
+      "objects": [
+        {
+          "objectType": "page",
+          "objectId": 99008,
+          "description": "HOXT-PRR DM Items"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 81000,
+          "description": "HOXT General Ledger Entries"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 81002,
+          "description": "HOXT Purchase Order List"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 81001,
+          "description": "HOXT Purchase Order"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99003,
+          "description": "HOXT LSC Purchase Contract"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99004,
+          "description": "HOXT Whse. Receipt Subform"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99012,
+          "description": "HOXT Retail Item List"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99013,
+          "description": "HOXT Item List"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99014,
+          "description": "HOXT LSC Retail Item"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99015,
+          "description": "HOXT Item Card"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99016,
+          "description": "HOXT Purchase Order Archives"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99017,
+          "description": "HOXT Revaluation Journal"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99019,
+          "description": "HOXT Posted Purch. Inv. Lines"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99020,
+          "description": "HOXT VAT Entries"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99023,
+          "description": "HOXT PAS634 PRR DM List"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99024,
+          "description": "HOXT LSC Store Inventory Jnl"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99026,
+          "description": "HOXT LSC Item/Spec. Grp. Links"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99028,
+          "description": "HOXT-LSCRetailItemList260804"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99029,
+          "description": "HOXT LSC POS Terminal Card"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99030,
+          "description": "HOXT LSC STAFF Staff Card"
+        },
+        {
+          "objectType": "pageextension",
+          "objectId": 99031,
+          "description": "HOXT Transfer Order Subform"
+        },
+        {
+          "objectType": "tableextension",
+          "objectId": 81000,
+          "description": "HOXT Purchase Header"
+        },
+        {
+          "objectType": "tableextension",
+          "objectId": 99006,
+          "description": "HOXT LSC POS Terminal"
+        },
+        {
+          "objectType": "tableextension",
+          "objectId": 99007,
+          "description": "HOXT LSC Staff"
+        },
+        {
+          "objectType": "tableextension",
+          "objectId": 99008,
+          "description": "HOXT Transfer Header"
+        },
+        {
+          "objectType": "tableextension",
+          "objectId": 99009,
+          "description": "HOXT LSC Item/Spec. Grp. Link"
+        },
+        {
+          "objectType": "tableextension",
+          "objectId": 99010,
+          "description": "HOXT Transfer Shipment Header"
+        },
+        {
+          "objectType": "tableextension",
+          "objectId": 99011,
+          "description": "HOXT Transfer Receipt Header"
+        }
+      ],
+      "lastSyncedAt": "2026-09-24T06:00:43.331Z"
     },
     "onpremenh": {
       "owner": "",
@@ -37,7 +178,7 @@
       "lastSyncedAt": null
     }
   },
-  "lastRunAt": "2026-09-24T05:48:22.087Z",
-  "lastRunStatus": "error",
-  "lastRunError": "[cloudenh] Resource not accessible by personal access token"
+  "lastRunAt": "2026-09-24T06:00:43.331Z",
+  "lastRunStatus": "success",
+  "lastRunError": ""
 }
