@@ -2485,7 +2485,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dev-tool-data.json 2>/dev/null || { echo "dev-tool-data.json not present — nothing to commit."; exit 0; }
           git diff --cached --quiet && echo "No changes to commit." || git commit -m "Dev-tool sync ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-          git push
+          # Something else (a manual re-run, or another workflow like the BC
+          # Extension Snapshot) can land a commit on this branch between the
+          # checkout above and this push. Retry with a rebase instead of
+          # failing outright — this local commit only ever touches
+          # dev-tool-data.json, so rebasing onto whatever else landed is safe.
+          for i in 1 2 3 4 5; do
+            git push && break
+            echo "Push rejected (attempt $i) — pulling and retrying..."
+            git pull --rebase origin \${{ github.ref_name }}
+            sleep $((RANDOM % 5 + 1))
+          done
 `;
 }
 async function pushDevToolSyncScriptToGithub(){
