@@ -2599,14 +2599,40 @@ function settingsDevToolSync(){
 
 const DEVOBJ_STATUS_OPTS = HOXT_STATUS_OPTS; // reuse the same Active/In Development/Pending Release/Obsolete/Deprecated set used on HOXT Projects, for one consistent vocabulary across the app
 function devObjKey(objectType, objectId){ return `${objectType}:${objectId}`; }
-// Manually-tracked fields (Status/Definition/Latest Version/Remarks/Ticket Tag)
-// live separately from the auto-synced objects array, keyed by type:id, so a
-// GitHub Actions re-sync (which only knows Type/ID/Description) never wipes
-// them out — see the "...cfg" spread in syncOneSource() in the sync script.
+// Manually-tracked fields (Status/Definition/Remarks) live separately from the
+// auto-synced objects array, keyed by type:id, so a GitHub Actions re-sync
+// (which only knows Type/ID/Description) never wipes them out — see the
+// "...cfg" spread in syncOneSource() in the sync script. Latest Version and
+// Ticket Tag are NOT stored here — they're detected fresh every time the
+// object is opened (see devObjLatestVersion / ticketsForDevObject below).
 function devObjMeta(cfg, objectType, objectId){
   cfg.objectMeta = cfg.objectMeta || {};
   const k = devObjKey(objectType, objectId);
-  return cfg.objectMeta[k] || (cfg.objectMeta[k] = { definition:'', status:'active', latestVersion:'', remarks:'', ticketTag:'', updatedAt:null });
+  return cfg.objectMeta[k] || (cfg.objectMeta[k] = { definition:'', status:'active', remarks:'', updatedAt:null });
+}
+// AL keyword (from the parsed .al file) -> this app's own Object Type code
+// (Settings > Object Types). Matches the default seed codes; if those codes
+// were renamed, ticket matching below falls back to Object ID alone.
+const AL_TYPE_TO_CODE_HINT = {
+  table:'TAB', tableextension:'TBE', page:'PAG', pageextension:'PGE', pagecustomization:'PAG',
+  report:'REP', reportextension:'RPE', codeunit:'COD', query:'QUE', xmlport:'XML',
+  enum:'ENU', enumextension:'ENX', permissionset:'PST', permissionsetextension:'PST', interface:'INT',
+};
+// The only meaningful "Latest Version" for an AL object is the version of the
+// extension it ships in — AL doesn't version individual objects — so this is
+// simply the source's own synced app.json version, not something per-object.
+function devObjLatestVersion(cfg){ return cfg.version || null; }
+// Finds tickets (from the Tickets module) that list this exact Object
+// Type + Object ID among the objects they touch. Type is matched via the
+// AL-keyword hint above; if that code isn't found in this app's Object
+// Types list, falls back to matching on Object ID alone so a renamed code
+// doesn't silently hide a real match.
+function ticketsForDevObject(objectType, objectId){
+  const hintCode = AL_TYPE_TO_CODE_HINT[objectType];
+  const hintType = hintCode ? DB.settings.objectTypes.find(t=>t.code.toUpperCase()===hintCode) : null;
+  return DB.tickets.filter(t => (t.objects||[]).some(o =>
+    o.objectId === objectId && (hintType ? o.objectType === hintType.id : true)
+  ));
 }
 function openDevObjectModal(sourceKey, objectType, objectId){
   const dt = devToolSyncSettings();
@@ -2619,10 +2645,12 @@ function openDevObjectModal(sourceKey, objectType, objectId){
   // something sensible to start from instead of a blank field.
   if(!meta.definition && o.description) meta.definition = o.description.slice(0,30);
   const canEdit = can('projects','modify');
-  openModal(devObjectModalHtml(sourceKey, o, meta, canEdit));
+  openModal(devObjectModalHtml(sourceKey, cfg, o, meta, canEdit));
   bindDevObjectModal(sourceKey, o);
 }
-function devObjectModalHtml(sourceKey, o, meta, canEdit){
+function devObjectModalHtml(sourceKey, cfg, o, meta, canEdit){
+  const latestVersion = devObjLatestVersion(cfg);
+  const linkedTickets = ticketsForDevObject(o.objectType, o.objectId);
   return `
   <div class="modal">
     <div class="modal-head">
@@ -2645,10 +2673,20 @@ function devObjectModalHtml(sourceKey, o, meta, canEdit){
             ${DEVOBJ_STATUS_OPTS.map(s=>`<option value="${s.v}" ${meta.status===s.v?'selected':''}>${s.l}</option>`).join('')}
           </select>
         </div>
-        <div class="form-row"><label>Latest Version</label><input type="text" id="doVersion" value="${escapeAttr(meta.latestVersion)}" placeholder="e.g. 26.9.2.1" ${canEdit?'':'disabled'}></div>
+        <div class="form-row">
+          <label>Latest Version <span class="hint">(auto, from the synced repo)</span></label>
+          <div class="readonly-field">${latestVersion?vchip(latestVersion):`<span class="hint">Not synced yet</span>`}</div>
+        </div>
       </div>
       <div class="form-row"><label>Latest Remarks</label><textarea id="doRemarks" rows="3" ${canEdit?'':'disabled'}>${escapeHtml(meta.remarks)}</textarea></div>
-      <div class="form-row"><label>Ticket Tag</label><input type="text" id="doTicketTag" value="${escapeAttr(meta.ticketTag)}" placeholder="e.g. TCK-1042" ${canEdit?'':'disabled'}></div>
+      <div class="form-row">
+        <label>Ticket Tag <span class="hint">(auto-detected from Tickets)</span></label>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+          ${linkedTickets.length
+            ? linkedTickets.map(t=>`<button class="btn btn-sm btn-ghost" data-open-ticket="${t.id}" style="font-family:monospace;">${escapeHtml(displayCode(t))}</button>`).join('')
+            : `<span class="hint" style="color:var(--text-faint);">No tickets reference this object yet.</span>`}
+        </div>
+      </div>
       <div class="hint" style="font-size:11.5px;color:var(--text-faint);">${meta.updatedAt?`Update as of ${timeAgo(meta.updatedAt)} (${new Date(meta.updatedAt).toLocaleString()})`:'Not updated yet'}</div>
     </div>
     <div class="modal-foot">
@@ -2660,6 +2698,9 @@ function devObjectModalHtml(sourceKey, o, meta, canEdit){
 function bindDevObjectModal(sourceKey, o){
   document.getElementById('modalClose').onclick = closeModal;
   document.getElementById('modalCancel').onclick = closeModal;
+  document.querySelectorAll('[data-open-ticket]').forEach(el=>{
+    el.addEventListener('click', ()=>{ closeModal(); openEntityModal('ticket', el.dataset.openTicket); });
+  });
   const defInput = document.getElementById('doDefinition');
   const defCount = document.getElementById('doDefCount');
   if(defInput) defInput.addEventListener('input', ()=>{ defCount.textContent = `(${defInput.value.length}/30)`; });
@@ -2671,9 +2712,7 @@ function bindDevObjectModal(sourceKey, o){
     const meta = devObjMeta(cfg, o.objectType, o.objectId);
     meta.definition = document.getElementById('doDefinition').value.slice(0,30);
     meta.status = document.getElementById('doStatus').value;
-    meta.latestVersion = document.getElementById('doVersion').value.trim();
     meta.remarks = document.getElementById('doRemarks').value.trim();
-    meta.ticketTag = document.getElementById('doTicketTag').value.trim();
     meta.updatedAt = new Date().toISOString();
     saveBtn.disabled = true; const original = saveBtn.textContent; saveBtn.textContent = 'Saving…';
     try{
