@@ -2259,10 +2259,10 @@ const DEVTOOL_DATA_PATH = 'dev-tool-data.json';
 function devToolSyncSettings(){
   return DB.settings.devToolSync || (DB.settings.devToolSync = {
     sources: {
-      devtool:   { owner:'', repo:'', branch:'main', folder:'' },
-      apis:      { owner:'', repo:'', branch:'main', folder:'' },
-      cloudenh:  { owner:'', repo:'', branch:'main', folder:'' },
-      onpremenh: { owner:'', repo:'', branch:'main', folder:'' },
+      devtool:   { owner:'', repo:'', branch:'main', folder:'', objectMeta:{} },
+      apis:      { owner:'', repo:'', branch:'main', folder:'', objectMeta:{} },
+      cloudenh:  { owner:'', repo:'', branch:'main', folder:'', objectMeta:{} },
+      onpremenh: { owner:'', repo:'', branch:'main', folder:'', objectMeta:{} },
     },
     lastRunAt:null, lastRunStatus:'', lastRunError:'',
   });
@@ -2291,6 +2291,7 @@ async function loadDevToolDataFromGithub(){
     local.sources[key] = {
       owner: remote.owner||'', repo: remote.repo||'', branch: remote.branch||'main', folder: remote.folder||'',
       version: remote.version||null, objects: remote.objects||[], lastSyncedAt: remote.lastSyncedAt||null,
+      objectMeta: remote.objectMeta||{}, // manually-entered Status/Definition/Remarks/Ticket Tag — the sync script preserves this untouched, so trust whatever's committed
     };
   });
   local.lastRunAt = data.lastRunAt||null;
@@ -2323,6 +2324,10 @@ async function saveDevToolSyncToGithubImpl(commitMessage){
     merged.sources[key] = {
       owner: localSources[key].owner, repo: localSources[key].repo, branch: localSources[key].branch||'main', folder: localSources[key].folder||'',
       version: remoteSrc?remoteSrc.version:null, objects: remoteSrc?remoteSrc.objects:[], lastSyncedAt: remoteSrc?remoteSrc.lastSyncedAt:null,
+      // Local wins for objectMeta — it's the thing actively being edited from
+      // this tab (Status/Definition/Remarks/Ticket Tag), so a save here should
+      // never lose an in-progress edit even if GitHub's copy is older.
+      objectMeta: localSources[key].objectMeta || (remoteSrc && remoteSrc.objectMeta) || {},
     };
   });
   DB.settings.devToolSync = merged;
@@ -2416,6 +2421,7 @@ async function syncOneSource(key, cfg) {
   objects.forEach(o => { byKey[\`\${o.type}:\${o.id}\`] = { objectType: o.type, objectId: o.id, description: o.name }; });
   console.log(\`[\${key}] \${cfg.owner}/\${cfg.repo}@\${cfg.branch || 'main'} — \${Object.keys(byKey).length} object(s)\${appMeta && appMeta.version ? \`, version \${appMeta.version}\` : ''}\`);
   return {
+    ...cfg, // preserves objectMeta (Status/Definition/Remarks/Ticket Tag, entered from the app) and anything else this script doesn't know about
     owner: cfg.owner, repo: cfg.repo, branch: cfg.branch || 'main', folder: cfg.folder || '',
     version: (appMeta && appMeta.version) || cfg.version || null,
     objects: Object.values(byKey),
@@ -2591,12 +2597,110 @@ function settingsDevToolSync(){
   </div>`;
 }
 
+const DEVOBJ_STATUS_OPTS = HOXT_STATUS_OPTS; // reuse the same Active/In Development/Pending Release/Obsolete/Deprecated set used on HOXT Projects, for one consistent vocabulary across the app
+function devObjKey(objectType, objectId){ return `${objectType}:${objectId}`; }
+// Manually-tracked fields (Status/Definition/Latest Version/Remarks/Ticket Tag)
+// live separately from the auto-synced objects array, keyed by type:id, so a
+// GitHub Actions re-sync (which only knows Type/ID/Description) never wipes
+// them out — see the "...cfg" spread in syncOneSource() in the sync script.
+function devObjMeta(cfg, objectType, objectId){
+  cfg.objectMeta = cfg.objectMeta || {};
+  const k = devObjKey(objectType, objectId);
+  return cfg.objectMeta[k] || (cfg.objectMeta[k] = { definition:'', status:'active', latestVersion:'', remarks:'', ticketTag:'', updatedAt:null });
+}
+function openDevObjectModal(sourceKey, objectType, objectId){
+  const dt = devToolSyncSettings();
+  const cfg = dt.sources[sourceKey];
+  const o = (cfg.objects||[]).find(x=>x.objectType===objectType && x.objectId===objectId);
+  if(!o) return;
+  const meta = devObjMeta(cfg, objectType, objectId);
+  // First time this object is opened, seed the editable Definition from the
+  // auto-synced description (trimmed to the 30-char limit) so there's
+  // something sensible to start from instead of a blank field.
+  if(!meta.definition && o.description) meta.definition = o.description.slice(0,30);
+  const canEdit = can('projects','modify');
+  openModal(devObjectModalHtml(sourceKey, o, meta, canEdit));
+  bindDevObjectModal(sourceKey, o);
+}
+function devObjectModalHtml(sourceKey, o, meta, canEdit){
+  return `
+  <div class="modal">
+    <div class="modal-head">
+      <h3>${icon('objects')} ${escapeHtml((o.objectType||'').toUpperCase())} ${o.objectId}</h3>
+      <button class="close-x" id="modalClose">${icon('close')}</button>
+    </div>
+    <div style="padding:20px;">
+      <div class="form-grid">
+        <div class="form-row"><label>Object Type</label><input type="text" value="${escapeAttr((o.objectType||'').toUpperCase())}" disabled></div>
+        <div class="form-row"><label>Object ID</label><input type="text" value="${o.objectId}" disabled></div>
+      </div>
+      <div class="form-row">
+        <label>Object Definition <span class="hint" id="doDefCount">(${meta.definition.length}/30)</span></label>
+        <input type="text" id="doDefinition" maxlength="30" value="${escapeAttr(meta.definition)}" placeholder="${escapeAttr((o.description||'').slice(0,30))}" ${canEdit?'':'disabled'}>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Status</label>
+          <select id="doStatus" ${canEdit?'':'disabled'}>
+            ${DEVOBJ_STATUS_OPTS.map(s=>`<option value="${s.v}" ${meta.status===s.v?'selected':''}>${s.l}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"><label>Latest Version</label><input type="text" id="doVersion" value="${escapeAttr(meta.latestVersion)}" placeholder="e.g. 26.9.2.1" ${canEdit?'':'disabled'}></div>
+      </div>
+      <div class="form-row"><label>Latest Remarks</label><textarea id="doRemarks" rows="3" ${canEdit?'':'disabled'}>${escapeHtml(meta.remarks)}</textarea></div>
+      <div class="form-row"><label>Ticket Tag</label><input type="text" id="doTicketTag" value="${escapeAttr(meta.ticketTag)}" placeholder="e.g. TCK-1042" ${canEdit?'':'disabled'}></div>
+      <div class="hint" style="font-size:11.5px;color:var(--text-faint);">${meta.updatedAt?`Update as of ${timeAgo(meta.updatedAt)} (${new Date(meta.updatedAt).toLocaleString()})`:'Not updated yet'}</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="modalCancel">Close</button>
+      ${canEdit?`<button class="btn btn-primary" id="doSaveBtn">${icon('upload')} Save</button>`:''}
+    </div>
+  </div>`;
+}
+function bindDevObjectModal(sourceKey, o){
+  document.getElementById('modalClose').onclick = closeModal;
+  document.getElementById('modalCancel').onclick = closeModal;
+  const defInput = document.getElementById('doDefinition');
+  const defCount = document.getElementById('doDefCount');
+  if(defInput) defInput.addEventListener('input', ()=>{ defCount.textContent = `(${defInput.value.length}/30)`; });
+  const saveBtn = document.getElementById('doSaveBtn');
+  if(!saveBtn) return;
+  saveBtn.onclick = async ()=>{
+    const dt = devToolSyncSettings();
+    const cfg = dt.sources[sourceKey];
+    const meta = devObjMeta(cfg, o.objectType, o.objectId);
+    meta.definition = document.getElementById('doDefinition').value.slice(0,30);
+    meta.status = document.getElementById('doStatus').value;
+    meta.latestVersion = document.getElementById('doVersion').value.trim();
+    meta.remarks = document.getElementById('doRemarks').value.trim();
+    meta.ticketTag = document.getElementById('doTicketTag').value.trim();
+    meta.updatedAt = new Date().toISOString();
+    saveBtn.disabled = true; const original = saveBtn.textContent; saveBtn.textContent = 'Saving…';
+    try{
+      await saveDevToolSyncToGithub(`Update ${(o.objectType||'').toUpperCase()} ${o.objectId} details (${new Date().toISOString()})`);
+      toast('Object details saved.', 'success');
+      closeModal();
+      render();
+    }catch(err){
+      toast(`Could not save to GitHub: ${err.message}`, 'danger');
+      saveBtn.disabled = false; saveBtn.textContent = original;
+    }
+  };
+}
 function viewDevSource(key){
   const dt = devToolSyncSettings();
   const cfg = dt.sources[key];
   const label = DEV_SOURCES[key].label;
   const objRows = (cfg.objects||[]).slice().sort((a,b)=>a.objectId-b.objectId).map(o=>{
-    return `<tr><td class="mono">${escapeHtml((o.objectType||'').toUpperCase())}</td><td class="mono">${o.objectId}</td><td>${escapeHtml(o.description||'')}</td></tr>`;
+    const meta = (cfg.objectMeta||{})[devObjKey(o.objectType, o.objectId)];
+    const statusVal = meta ? meta.status : 'active';
+    return `<tr class="clickable" data-devobj="${key}:${o.objectType}:${o.objectId}">
+      <td class="mono">${escapeHtml((o.objectType||'').toUpperCase())}</td>
+      <td class="mono">${o.objectId}</td>
+      <td>${escapeHtml((meta&&meta.definition) || o.description || '')}</td>
+      <td><span class="badge ${statusVal}"><span class="badge-dot"></span>${hoxtStatusLabel(statusVal)}</span></td>
+      <td style="color:var(--text-faint);font-size:12.5px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeAttr(meta&&meta.remarks||'')}">${escapeHtml(meta&&meta.remarks||'') || '—'}</td>
+    </tr>`;
   }).join('');
   return `
   <div class="filter-bar">
@@ -2609,8 +2713,8 @@ function viewDevSource(key){
     <div class="section-title" style="padding:16px 18px 0;"><h3>${escapeHtml(label)} Objects <span class="hint" style="font-weight:400;">(${(cfg.objects||[]).length})</span></h3></div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Type</th><th>Object ID</th><th>Description</th></tr></thead>
-        <tbody>${objRows || `<tr class="empty-row"><td colspan="3">${icon('search')}<br>Not synced yet — connect this source under Settings &gt; Dev-tool Sync and run a sync.</td></tr>`}</tbody>
+        <thead><tr><th>Type</th><th>Object ID</th><th>Definition</th><th>Status</th><th>Latest Remarks</th></tr></thead>
+        <tbody>${objRows || `<tr class="empty-row"><td colspan="5">${icon('search')}<br>Not synced yet — connect this source under Settings &gt; Dev-tool Sync and run a sync.</td></tr>`}</tbody>
       </table>
     </div>
   </div>`;
@@ -4154,6 +4258,13 @@ function attachContentHandlers(){
 
   const dsGoToSettings = document.getElementById('dsGoToSettings');
   if(dsGoToSettings) dsGoToSettings.addEventListener('click', ()=>{ state.settingsTab='devtoolsync'; setView('settings'); });
+
+  document.querySelectorAll('[data-devobj]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const [sourceKey, objectType, objectId] = el.dataset.devobj.split(':');
+      openDevObjectModal(sourceKey, objectType, Number(objectId));
+    });
+  });
 
   const saveDevToolSyncConn = document.getElementById('saveDevToolSyncConn');
   if(saveDevToolSyncConn) saveDevToolSyncConn.addEventListener('click', async ()=>{
